@@ -422,7 +422,7 @@ def main():
     st.sidebar.header("Filtros")
 
     # Rango de fechas equivalente al Calendario de Power BI
-    default_start = date(2025, 10, 1)
+    default_start = date(2025, 12, 1)
     default_end = date.today()
 
     fecha_ini = st.sidebar.date_input("Fecha inicio", default_start)

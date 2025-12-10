@@ -124,7 +124,7 @@ def df_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Datos") -> bytes:
 # -------------------------------------------------
 # DB CONNECTION
 # -------------------------------------------------
-# 👇 removed cache_resource; each call returns a fresh connection
+@st.cache_resource
 def get_connection():
     cfg = st.secrets["sql"]
     driver = cfg["driver"]
@@ -133,6 +133,7 @@ def get_connection():
     user = cfg["user"]
     password = cfg["password"]
 
+    # MARS_Connection=yes to allow multiple active results on same connection
     conn_str = (
         f"DRIVER={{{driver}}};"
         f"SERVER={server};"
@@ -141,26 +142,20 @@ def get_connection():
         f"PWD={password};"
         "Encrypt=yes;"
         "TrustServerCertificate=yes;"
-        # optional, if you want MARS:
-        # "MARS_Connection=Yes;"
+        "MARS_Connection=yes;"
     )
-    return pyodbc.connect(conn_str)
+    return pyodbc.connect(conn_str, autocommit=True)
 
 
 # -------------------------------------------------
 # LOAD DATA FROM SQL
 # -------------------------------------------------
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=1200)   # 20 minutes
 def load_hoja1():
     """
     Tabla equivalente a Hoja1 de Power BI,
     pero leyendo directamente de reporte_empleado en SQL.
-
-    - Solo ATT, CONTACT CENTER, VIRTUAL
-    - Solo puestos teléfono/supervisor
-    - Solo empleados ACTIVO
     """
-
     sql = """
     SELECT DISTINCT
         e.[Nombre Completo] AS NombreCompleto,
@@ -189,9 +184,8 @@ def load_hoja1():
         AND e.[Estatus] = 'ACTIVO';
     """
 
-    # 👇 open & close connection just for this query
-    with get_connection() as conn:
-        df = pd.read_sql(sql, conn)
+    conn = get_connection()
+    df = pd.read_sql(sql, conn)
 
     # Limpieza de textos
     text_cols = [
@@ -211,7 +205,7 @@ def load_hoja1():
         df[col] = df[col].astype(str).str.strip()
         df[col] = df[col].replace({"nan": np.nan, "None": np.nan})
 
-    # Como hacías en Power BI: supervisor vacío -> "ENCUBADORA"
+    # supervisor vacío -> "ENCUBADORA"
     df["JefeDirecto"] = df["JefeDirecto"].fillna("").str.strip()
     df["JefeDirecto"] = df["JefeDirecto"].replace("", "ENCUBADORA")
 
@@ -221,7 +215,7 @@ def load_hoja1():
     return df
 
 
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=1200)   # 20 minutes
 def load_consulta1(fecha_ini: date, fecha_fin: date) -> pd.DataFrame:
     """
     Replica Consulta1 base (sin las transformaciones).
@@ -237,6 +231,7 @@ def load_consulta1(fecha_ini: date, fecha_fin: date) -> pd.DataFrame:
         [Tienda solicita] AS Centro,
         [Estatus],
         [Back Office],
+        [Fecha contacto],
         [Fecha creacion],
         [Venta],
         [Vendedor]
@@ -246,11 +241,8 @@ def load_consulta1(fecha_ini: date, fecha_fin: date) -> pd.DataFrame:
         [Estatus] IN ('En entrega','Canc Error','Entregado',
                       'En preparacion','Back Office','Solicitado');
     """
-
-    # 👇 new connection per call
-    with get_connection() as conn:
-        df = pd.read_sql(sql, conn)
-
+    conn = get_connection()
+    df = pd.read_sql(sql, conn)
     return df
 
 
@@ -266,8 +258,8 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
             df[col] = df[col].astype(str).str.strip()
             df[col] = df[col].replace({"nan": np.nan, "None": np.nan})
 
-    # --- Centro Original (sin np.where) ---
-    df["Centro Original"] = np.nan  # empezamos todo como NaN (object)
+    # --- Centro Original ---
+    df["Centro Original"] = np.nan
 
     mask_cc2 = df["Centro"].str.contains("EXP ATT C CENTER 2", na=False)
     mask_juarez = df["Centro"].str.contains("EXP ATT C CENTER JUAREZ", na=False)
@@ -295,7 +287,7 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
 
     df["Region"] = df["Centro"].apply(region_from_centro)
 
-    # --- Join con Hoja1 (ejecutivos / supervisores) ---
+    # --- Join con Hoja1 ---
     hoja_join = hoja.rename(
         columns={
             "NombreCompleto": "Nombre Completo",
@@ -310,7 +302,6 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
         right_on="Nombre Completo",
     )
 
-    # ya no necesitamos la columna de join
     df.drop(columns=["Nombre Completo"], inplace=True, errors="ignore")
 
     # --- Status calculado ---
@@ -333,12 +324,13 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
 
     df["Status"] = df.apply(status_calc, axis=1)
 
-    # --- Campos de fecha / hora ---
-    df["Fecha creacion"] = pd.to_datetime(df["Fecha creacion"])
+    # --- Fechas base (Fecha creacion) ---
+    df["Fecha creacion"] = pd.to_datetime(
+        df["Fecha creacion"], errors="coerce", dayfirst=True
+    )
     df["Fecha"] = df["Fecha creacion"].dt.date
     df["Hora"] = df["Fecha creacion"].dt.hour
 
-    # --- Campos tipo calendario ---
     iso = df["Fecha creacion"].dt.isocalendar()
     df["Año"] = df["Fecha creacion"].dt.year
     df["MesNum"] = df["Fecha creacion"].dt.month
@@ -350,10 +342,16 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
         iso["year"].astype(str) + "-" + iso["week"].astype(str).str.zfill(2)
     )
 
+    # --- Fecha contacto (para Activadas) ---
+    df["Fecha contacto"] = pd.to_datetime(
+        df["Fecha contacto"], errors="coerce", dayfirst=True
+    )
+    df["MesContactoNum"] = df["Fecha contacto"].dt.month
+
     return df
 
 
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=1200)
 def build_sin_venta(hoja: pd.DataFrame, consulta: pd.DataFrame) -> pd.DataFrame:
     """
     Replica la tabla SinVenta original:
@@ -372,10 +370,26 @@ def build_sin_venta(hoja: pd.DataFrame, consulta: pd.DataFrame) -> pd.DataFrame:
 
 
 # -------------------------------------------------
-# KPI HELPERS (equivalentes a medidas DAX)
+# KPI HELPERS
 # -------------------------------------------------
-def kpi_activadas(df: pd.DataFrame) -> int:
-    return int((df["Status"] == "Entregado").sum())
+def kpi_activadas(df: pd.DataFrame, mes_sel: str = "All") -> int:
+    """
+    Activadas (Entregado) usando:
+    - Estatus = 'Entregado'
+    - Mes basado en Fecha contacto (MesContactoNum) y el slicer de Mes.
+    """
+    if df.empty:
+        return 0
+
+    mask = df["Estatus"] == "Entregado"
+
+    if mes_sel != "All" and "MesContactoNum" in df.columns:
+        month_map = {datetime(2000, m, 1).strftime("%B"): m for m in range(1, 13)}
+        m_num = month_map.get(mes_sel)
+        if m_num is not None:
+            mask = mask & (df["MesContactoNum"] == m_num)
+
+    return int(mask.sum())
 
 
 def kpi_back(df: pd.DataFrame) -> int:
@@ -403,7 +417,6 @@ def kpi_total_canc_error(df: pd.DataFrame) -> int:
 
 
 def kpi_total_programadas(df: pd.DataFrame) -> int:
-    # igual que Total Programadas = Estatus <> "Canc Error"
     return int((df["Estatus"] != "Canc Error").sum())
 
 
@@ -422,12 +435,11 @@ def kpi_total_sinventa(df_sinventa: pd.DataFrame) -> int:
 # MAIN APP
 # -------------------------------------------------
 def main():
-    st.title("Dashboard Transito Global  – CC")
+    st.title("Dashboard Transito  – CC")
 
     # ----------- Sidebar: rangos de fecha y filtros globales -----------
     st.sidebar.header("Filtros")
 
-    # Rango de fechas equivalente al Calendario de Power BI
     default_start = date(2025, 10, 1)
     default_end = date.today()
 
@@ -445,7 +457,7 @@ def main():
         consulta = transform_consulta1(consulta_raw, hoja)
         sinventa = build_sin_venta(hoja, consulta)
 
-    # Filtros de Centro, Supervisor y Mes (como en el panel negro de PBI)
+    # ---- Filtros de Centro, Supervisor, Mes ----
     centros = ["All"] + sorted(
         [c for c in consulta["Centro Original"].dropna().unique().tolist()]
     )
@@ -456,22 +468,54 @@ def main():
 
     centro_sel = st.sidebar.selectbox("Centro", centros, index=0)
     supervisor_sel = st.sidebar.selectbox("Supervisor", supervisores, index=0)
-    mes_sel = st.sidebar.selectbox("Mes", meses, index=0)
+    mes_sel = st.sidebar.selectbox("Mes (Fecha creación)", meses, index=0)
 
+    # Para opciones de Ejecutivo: mismo contexto que Detalle General
+    df_for_exec = consulta.copy()
+    if centro_sel != "All":
+        df_for_exec = df_for_exec[df_for_exec["Centro Original"] == centro_sel]
+    if supervisor_sel != "All":
+        df_for_exec = df_for_exec[df_for_exec["Jefe directo"] == supervisor_sel]
+    if mes_sel != "All":
+        df_for_exec = df_for_exec[df_for_exec["Mes"] == mes_sel]
+
+    ejecutivos = ["All"] + sorted(
+        [e for e in df_for_exec["Vendedor"].dropna().unique().tolist()]
+    )
+    ejecutivo_sel = st.sidebar.selectbox("Ejecutivo", ejecutivos, index=0)
+
+    # ---- Construir df para dashboard y df_kpi para Activadas ----
     df = consulta.copy()
+    df_kpi = consulta.copy()
+
     if centro_sel != "All":
         df = df[df["Centro Original"] == centro_sel]
+        df_kpi = df_kpi[df_kpi["Centro Original"] == centro_sel]
+
     if supervisor_sel != "All":
         df = df[df["Jefe directo"] == supervisor_sel]
+        df_kpi = df_kpi[df_kpi["Jefe directo"] == supervisor_sel]
+
+    if ejecutivo_sel != "All":
+        df = df[df["Vendedor"] == ejecutivo_sel]
+        df_kpi = df_kpi[df_kpi["Vendedor"] == ejecutivo_sel]
+
     if mes_sel != "All":
         df = df[df["Mes"] == mes_sel]
 
-    # SinVenta filtrado por supervisor si aplica
+    # -------- SinVenta filtrado --------
     sinv_fil = sinventa.copy()
     if supervisor_sel != "All":
         sinv_fil = sinv_fil[sinv_fil["JefeDirecto"] == supervisor_sel]
 
-    # ----------- Tabs (equivalentes a páginas de PBI) -----------
+    # excluir ENCUBADORA
+    sinv_fil = sinv_fil[sinv_fil["JefeDirecto"] != "ENCUBADORA"]
+
+    # excluir supervisores de Sin Venta (NombreCompleto igual a Jefe directo en detalle)
+    sup_con_detalle = df["Jefe directo"].dropna().unique()
+    sinv_fil = sinv_fil[~sinv_fil["NombreCompleto"].isin(sup_con_detalle)]
+
+    # ----------- Tabs -----------
     tabs = st.tabs(
         [
             "Resumen",
@@ -496,7 +540,7 @@ def main():
             st.metric("En entrega", kpi_en_entrega(df))
             st.metric("En tránsito", kpi_en_transito(df))
         with col3:
-            st.metric("Activadas (Entregado)", kpi_activadas(df))
+            st.metric("Activadas (Entregado)", kpi_activadas(df_kpi, mes_sel))
             st.metric("Back Office", kpi_back(df))
 
         st.metric("Entregados sin venta (Validación)", kpi_entregados_sin_venta(df))
@@ -512,9 +556,11 @@ def main():
     with tabs[1]:
         st.subheader("Back Office")
 
-        df_back = df[df["Estatus"] == "Back Office"]
+        bo_col = df["Back Office"].astype(str).str.strip()
+        df_back = df[bo_col != ""].copy()
+
         if df_back.empty:
-            st.info("No hay registros con Estatus = 'Back Office' para los filtros actuales.")
+            st.info("No hay registros con datos en la columna 'Back Office' para los filtros actuales.")
         else:
             by_day = df_back.groupby("Fecha", as_index=False).size()
             fig = px.bar(
@@ -522,7 +568,7 @@ def main():
                 x="Fecha",
                 y="size",
                 title="Total por día (Back Office)",
-                labels={"size": "Total Programadas"},
+                labels={"size": "Total Back Office"},
             )
             st.plotly_chart(fig, use_container_width=True)
 
@@ -537,7 +583,7 @@ def main():
                 x="Hora",
                 y="size",
                 title=f"Desglose por hora – {day_sel}",
-                labels={"size": "Total Programadas"},
+                labels={"size": "Total Back Office"},
             )
             st.plotly_chart(fig2, use_container_width=True)
 
@@ -571,6 +617,7 @@ def main():
                 sorted(by_day["Fecha"].unique()),
             )
             df_day = df_canc[df_canc["Fecha"] == day_sel]
+
             by_hour = df_day.groupby("Hora", as_index=False).size()
             fig2 = px.bar(
                 by_hour,
@@ -580,6 +627,30 @@ def main():
                 labels={"size": "Total Canc Error"},
             )
             st.plotly_chart(fig2, use_container_width=True)
+
+            # ---------- Detalle de cancelaciones por Ejecutivo / Jefe directo ----------
+            st.subheader("Detalle de cancelaciones (Ejecutivo / Jefe directo)")
+            detalle_cols = [
+                c
+                for c in [
+                    "Jefe directo",
+                    "Vendedor",
+                    "Folio",
+                    "Fecha",
+                    "Hora",
+                    "Centro",
+                    "Estatus",
+                    "Venta",
+                ]
+                if c in df_day.columns
+            ]
+
+            df_det = df_day[detalle_cols].rename(columns={"Vendedor": "Ejecutivo"})
+            df_det = df_det.sort_values(
+                [col for col in ["Jefe directo", "Ejecutivo", "Hora", "Folio"] if col in df_det.columns]
+            )
+
+            st.dataframe(df_det)
 
             st.download_button(
                 "Descargar Canceladas (Excel)",
@@ -652,13 +723,47 @@ def main():
         if df.empty:
             st.info("Sin datos para los filtros actuales.")
         else:
-            grouped = (
-                df.groupby(["Jefe directo", "Vendedor"], as_index=False)
-                .agg(
-                    TotalProgramadas=("Folio", "count"),
-                    Activadas=("Status", lambda s: int((s == "Entregado").sum())),
-                    EnTransito=("Status", lambda s: int((s == "En Transito").sum())),
+            # ---- Resumen por Jefe / Ejecutivo, con desglose de EnTransito ----
+            def resumen_grupo(g):
+                total = len(g)
+                activadas = (g["Status"] == "Entregado").sum()
+                en_transito = (g["Status"] == "En Transito").sum()
+
+                # Solo los que están En Transito y vemos su Estatus real
+                et_en_entrega = (
+                    (g["Status"] == "En Transito") & (g["Estatus"] == "En entrega")
+                ).sum()
+                et_en_preparacion = (
+                    (g["Status"] == "En Transito") & (g["Estatus"] == "En preparacion")
+                ).sum()
+                et_solicitado = (
+                    (g["Status"] == "En Transito") & (g["Estatus"] == "Solicitado")
+                ).sum()
+                et_backoffice = (
+                    (g["Status"] == "En Transito") & (g["Estatus"] == "Back Office")
+                ).sum()
+                # Entregado pero sin venta → En Transito
+                et_entregado_sin_venta = (
+                    (g["Status"] == "En Transito") & (g["Estatus"] == "Entregado")
+                ).sum()
+
+                return pd.Series(
+                    {
+                        "TotalProgramadas": int(total),
+                        "Activadas": int(activadas),
+                        "EnTransito": int(en_transito),
+                        "ET En entrega": int(et_en_entrega),
+                        "ET En preparacion": int(et_en_preparacion),
+                        "ET Solicitado": int(et_solicitado),
+                        "ET Back Office": int(et_backoffice),
+                        "ET Entregado sin venta": int(et_entregado_sin_venta),
+                    }
                 )
+
+            grouped = (
+                df.groupby(["Jefe directo", "Vendedor"])
+                .apply(resumen_grupo)
+                .reset_index()
                 .rename(columns={"Vendedor": "Ejecutivo"})
             )
 
@@ -684,6 +789,54 @@ def main():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
+            # ---- Detalle línea a línea de En Transito ----
+            st.subheader("Detalle de registros En Tránsito")
+
+            cols_det_en_t = [
+                c
+                for c in [
+                    "Jefe directo",
+                    "Vendedor",
+                    "Folio",
+                    "Fecha",
+                    "Hora",
+                    "Centro",
+                    "Estatus",   # estatus real: En entrega, Back Office, etc.
+                    "Status",    # columna calculada: En Transito / Entregado
+                    "Venta",
+                ]
+                if c in df.columns
+            ]
+
+            df_en_t = df[df["Status"] == "En Transito"][cols_det_en_t].rename(
+                columns={"Vendedor": "Ejecutivo"}
+            )
+
+            if df_en_t.empty:
+                st.info("No hay registros En Transito para los filtros actuales.")
+            else:
+                df_en_t = df_en_t.sort_values(
+                    [
+                        col
+                        for col in [
+                            "Jefe directo",
+                            "Ejecutivo",
+                            "Fecha",
+                            "Hora",
+                            "Folio",
+                        ]
+                        if col in df_en_t.columns
+                    ]
+                )
+                st.dataframe(df_en_t)
+
+                st.download_button(
+                    "Descargar detalle En Tránsito (Excel)",
+                    data=df_to_excel_bytes(df_en_t, "EnTransitoDetalle"),
+                    file_name=f"en_transito_detalle_{fecha_ini}_{fecha_fin}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+
     # ==================== TAB 6: SIN VENTA ====================
     with tabs[6]:
         st.subheader("Ejecutivos sin venta")
@@ -694,7 +847,6 @@ def main():
         if sinv_fil.empty:
             st.info("No hay ejecutivos sin venta para los filtros actuales.")
         else:
-            # Ordena por JefeDirecto y nombre
             df_sinv = sinv_fil.sort_values(["JefeDirecto", "NombreCompleto"])
             st.dataframe(df_sinv[["JefeDirecto", "NombreCompleto"]])
 

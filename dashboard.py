@@ -472,7 +472,7 @@ def kpi_total_sinventa(df_sinventa: pd.DataFrame) -> int:
 # MAIN APP
 # -------------------------------------------------
 def main():
-    st.title("Dashboard Transito  – CC")
+    st.title("Dashboard Transito Global  – CC")
 
     # ----------- Sidebar: rangos de fecha y filtros globales -----------
     st.sidebar.header("Filtros")
@@ -599,6 +599,7 @@ def main():
         if df_back.empty:
             st.info("No hay registros con datos en la columna 'Back Office' para los filtros actuales.")
         else:
+            # ---- Totales por día ----
             by_day = df_back.groupby("Fecha", as_index=False).size()
             fig = px.bar(
                 by_day,
@@ -609,20 +610,45 @@ def main():
             )
             st.plotly_chart(fig, use_container_width=True)
 
+            # ---- Selección de día y comportamiento por hora / equipo ----
             day_sel = st.selectbox(
-                "Selecciona un día para ver el desglose por hora",
+                "Selecciona un día para ver el desglose por hora y equipo",
                 sorted(by_day["Fecha"].unique()),
             )
             df_day = df_back[df_back["Fecha"] == day_sel]
-            by_hour = df_day.groupby("Hora", as_index=False).size()
-            fig2 = px.bar(
-                by_hour,
+
+            # Total por hora (todas las personas) – lo dejamos como referencia
+            by_hour_total = df_day.groupby("Hora", as_index=False).size()
+            fig_total = px.bar(
+                by_hour_total,
                 x="Hora",
                 y="size",
-                title=f"Desglose por hora – {day_sel}",
+                title=f"Total Back Office por hora – {day_sel}",
                 labels={"size": "Total Back Office"},
             )
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig_total, use_container_width=True)
+
+            # 👇 Nuevo: comportamiento por hora *y* Jefe directo (equipos)
+            by_hour_team = (
+                df_day.groupby(["Hora", "Jefe directo"], as_index=False)
+                .size()
+                .rename(columns={"size": "Total"})
+            )
+
+            fig_team = px.bar(
+                by_hour_team,
+                x="Hora",
+                y="Total",
+                color="Jefe directo",
+                barmode="group",  # cambia a "stack" si prefieres barras apiladas
+                title=f"Back Office por hora y equipo – {day_sel}",
+                labels={
+                    "Total": "Total Back Office",
+                    "Hora": "Hora",
+                    "Jefe directo": "Supervisor",
+                },
+            )
+            st.plotly_chart(fig_team, use_container_width=True)
 
             st.download_button(
                 "Descargar Back Office (Excel)",
@@ -630,6 +656,7 @@ def main():
                 file_name=f"backoffice_{fecha_ini}_{fecha_fin}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
+
 
     # ==================== TAB 2: CANCELADAS ====================
     with tabs[2]:

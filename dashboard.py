@@ -17,6 +17,7 @@ st.set_page_config(
 )
 
 # ---------- Fancy global styles ----------
+# ---------- Fancy global styles ----------
 st.markdown(
     """
 <style>
@@ -24,11 +25,45 @@ html, body, [class*="css"]  {
     font-family: "Segoe UI", system-ui, sans-serif;
 }
 
-/* Main background */
-section.main {
-    background: radial-gradient(circle at top left,#020617 0,#0b1120 45%,#020617 100%);
-    color: #f9fafb;
+/* ---------- Design tokens (light default) ---------- */
+:root {
+    --accent-1: #0ea5e9;
+    --accent-2: #6366f1;
+    --accent-3: #22c55e;
+
+    --card-radius: 16px;
+    --pill-radius: 999px;
+
+    /* Light theme defaults */
+    --card-bg: rgba(255,255,255,0.9);
+    --card-border: rgba(15,23,42,0.08);
+    --card-shadow: 0 8px 20px rgba(15,23,42,0.08);
+
+    --tab-bg: rgba(148,163,184,0.08);
+    --tab-border: rgba(148,163,184,0.35);
+    --tab-fg: #111827;
+
+    --tab-bg-active: linear-gradient(90deg,#22c55e,#06b6d4);
+    --tab-fg-active: #ffffff;
 }
+
+/* Override tokens when OS / browser is in dark mode */
+@media (prefers-color-scheme: dark) {
+    :root {
+        --card-bg: rgba(15,23,42,0.9);
+        --card-border: rgba(148,163,184,0.55);
+        --card-shadow: 0 10px 30px rgba(15,23,42,0.7);
+
+        --tab-bg: rgba(15,23,42,0.9);
+        --tab-border: rgba(148,163,184,0.55);
+        --tab-fg: #e5e7eb;
+
+        --tab-bg-active: linear-gradient(90deg,#22c55e,#06b6d4);
+        --tab-fg-active: #0f172a;
+    }
+}
+
+/* Container spacing */
 .block-container {
     padding-top: 1.2rem;
     padding-bottom: 2rem;
@@ -39,50 +74,51 @@ h1 {
     font-weight: 800 !important;
 }
 
-/* Tabs */
+/* ---------- Tabs ---------- */
 .stTabs [role="tablist"] {
     gap: 6px;
 }
 .stTabs [role="tab"] {
     padding: 6px 14px;
-    border-radius: 999px;
-    background-color: #020617;
-    color: #e5e7eb;
-    border: 1px solid rgba(148,163,184,0.4);
+    border-radius: var(--pill-radius);
+    background-color: var(--tab-bg);
+    color: var(--tab-fg);
+    border: 1px solid var(--tab-border);
+    font-weight: 500;
 }
 .stTabs [aria-selected="true"] {
-    background: linear-gradient(90deg,#22c55e,#06b6d4);
-    color: #0f172a !important;
+    background: var(--tab-bg-active);
+    color: var(--tab-fg-active) !important;
     border-color: transparent !important;
 }
 
-/* Metrics */
+/* ---------- Metrics ---------- */
 [data-testid="stMetric"] {
-    background: rgba(15,23,42,0.9);
-    border-radius: 16px;
+    background: var(--card-bg);
+    border-radius: var(--card-radius);
     padding: 10px 14px;
-    border: 1px solid rgba(148,163,184,0.55);
-    box-shadow: 0 10px 30px rgba(15,23,42,0.7);
+    border: 1px solid var(--card-border);
+    box-shadow: var(--card-shadow);
 }
 [data-testid="stMetricValue"] {
     font-size: 1.7rem;
     font-weight: 800;
 }
 
-/* Download buttons */
+/* ---------- Download buttons ---------- */
 div[data-testid="stDownloadButton"] > button {
-    border-radius: 999px;
-    background: linear-gradient(90deg,#0ea5e9,#6366f1);
+    border-radius: var(--pill-radius);
+    background: linear-gradient(90deg,var(--accent-1),var(--accent-2));
     color: #f9fafb;
     border: none;
     padding: 0.4rem 1.3rem;
     font-weight: 600;
 }
 div[data-testid="stDownloadButton"] > button:hover {
-    filter: brightness(1.1);
+    filter: brightness(1.06);
 }
 
-/* Plotly transparent background */
+/* ---------- Plotly transparent background ---------- */
 .js-plotly-plot .plotly .main-svg {
     background-color: rgba(0,0,0,0) !important;
 }
@@ -90,6 +126,7 @@ div[data-testid="stDownloadButton"] > button:hover {
 """,
     unsafe_allow_html=True,
 )
+
 
 # -------------------------------------------------
 # SMALL HELPER: DF -> EXCEL BYTES (auto-fit + filters)

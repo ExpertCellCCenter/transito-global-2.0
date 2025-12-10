@@ -124,7 +124,7 @@ def df_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Datos") -> bytes:
 # -------------------------------------------------
 # DB CONNECTION
 # -------------------------------------------------
-@st.cache_resource
+# 👇 removed cache_resource; each call returns a fresh connection
 def get_connection():
     cfg = st.secrets["sql"]
     driver = cfg["driver"]
@@ -141,6 +141,8 @@ def get_connection():
         f"PWD={password};"
         "Encrypt=yes;"
         "TrustServerCertificate=yes;"
+        # optional, if you want MARS:
+        # "MARS_Connection=Yes;"
     )
     return pyodbc.connect(conn_str)
 
@@ -187,8 +189,9 @@ def load_hoja1():
         AND e.[Estatus] = 'ACTIVO';
     """
 
-    conn = get_connection()
-    df = pd.read_sql(sql, conn)
+    # 👇 open & close connection just for this query
+    with get_connection() as conn:
+        df = pd.read_sql(sql, conn)
 
     # Limpieza de textos
     text_cols = [
@@ -243,8 +246,11 @@ def load_consulta1(fecha_ini: date, fecha_fin: date) -> pd.DataFrame:
         [Estatus] IN ('En entrega','Canc Error','Entregado',
                       'En preparacion','Back Office','Solicitado');
     """
-    conn = get_connection()
-    df = pd.read_sql(sql, conn)
+
+    # 👇 new connection per call
+    with get_connection() as conn:
+        df = pd.read_sql(sql, conn)
+
     return df
 
 

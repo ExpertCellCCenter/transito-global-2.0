@@ -17,7 +17,6 @@ st.set_page_config(
 )
 
 # ---------- Fancy global styles ----------
-# ---------- Fancy global styles ----------
 st.markdown(
     """
 <style>
@@ -127,7 +126,6 @@ div[data-testid="stDownloadButton"] > button:hover {
     unsafe_allow_html=True,
 )
 
-
 # -------------------------------------------------
 # SMALL HELPER: DF -> EXCEL BYTES (auto-fit + filters)
 # -------------------------------------------------
@@ -157,7 +155,6 @@ def df_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Datos") -> bytes:
     output.seek(0)
     return output.getvalue()
 
-
 # -------------------------------------------------
 # DB CONNECTION
 # -------------------------------------------------
@@ -183,15 +180,15 @@ def get_connection():
     )
     return pyodbc.connect(conn_str, autocommit=True)
 
-
 # -------------------------------------------------
 # LOAD DATA FROM SQL
 # -------------------------------------------------
 @st.cache_data(ttl=1200)   # 20 minutes
 def load_hoja1():
     """
-    Tabla equivalente a Hoja1 de Power BI,
+    Tabla equivalente a Empleados/Hoja1,
     pero leyendo directamente de reporte_empleado en SQL.
+    (Un poco más amplia que la de Power BI, pero compatible)
     """
     sql = """
     SELECT DISTINCT
@@ -251,11 +248,11 @@ def load_hoja1():
 
     return df
 
-
 @st.cache_data(ttl=1200)   # 20 minutes
 def load_consulta1(fecha_ini: date, fecha_fin: date) -> pd.DataFrame:
     """
-    Replica Consulta1 base (sin las transformaciones).
+    Replica VentasNC base (sin las transformaciones),
+    pero sólo para el rango seleccionado.
     """
     fi = fecha_ini.strftime("%Y%m%d")
     ff = fecha_fin.strftime("%Y%m%d")
@@ -282,9 +279,8 @@ def load_consulta1(fecha_ini: date, fecha_fin: date) -> pd.DataFrame:
     df = pd.read_sql(sql, conn)
     return df
 
-
 # -------------------------------------------------
-# TRANSFORMACIONES COMO EN POWER QUERY
+# TRANSFORMACIONES COMO EN POWER QUERY (VentasNC)
 # -------------------------------------------------
 def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFrame:
     df = df_raw.copy()
@@ -295,16 +291,16 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
             df[col] = df[col].astype(str).str.strip()
             df[col] = df[col].replace({"nan": np.nan, "None": np.nan})
 
-    # --- Centro Original ---
+    # --- Centro Original (igual a AggCentroOriginacion en M) ---
     df["Centro Original"] = np.nan
 
     mask_cc2 = df["Centro"].str.contains("EXP ATT C CENTER 2", na=False)
     mask_juarez = df["Centro"].str.contains("EXP ATT C CENTER JUAREZ", na=False)
 
     df.loc[mask_cc2, "Centro Original"] = "CC2"
-    df.loc[mask_juarez, "Centro Original"] = "Juarez"
+    df.loc[mask_juarez, "Centro Original"] = "CC JV"   # igual a tu M de Power BI
 
-    # --- Región ---
+    # --- Región (AggRegion equivalente) ---
     def region_from_centro(c):
         if not isinstance(c, str):
             return np.nan
@@ -324,7 +320,7 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
 
     df["Region"] = df["Centro"].apply(region_from_centro)
 
-    # --- Join con Hoja1 ---
+    # --- Join con "Empleados"/Hoja1 para Supervisor (como MergeSupervisor) ---
     hoja_join = hoja.rename(
         columns={
             "NombreCompleto": "Nombre Completo",
@@ -341,7 +337,11 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
 
     df.drop(columns=["Nombre Completo"], inplace=True, errors="ignore")
 
-    # --- Status calculado ---
+    # --- Status calculado EXACTO al M (AggStatus) ---
+    #   if Estatus in (En entrega, En preparacion, Solicitado, Back Office) => "En Transito"
+    #   else if Estatus = "Entregado" and Venta null/"" => "En Transito"
+    #   else => "Entregado"
+    #  OJO: Esto hace que "Canc Error" tenga Status = "Entregado", igual que en tu Power BI.
     def status_calc(row):
         est = row.get("Estatus")
         venta = row.get("Venta")
@@ -354,14 +354,12 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
         if est == "Entregado" and venta_vacia:
             return "En Transito"
 
-        if est == "Entregado":
-            return "Entregado"
-
-        return est
+        # Cualquier otro caso, incluido "Canc Error" -> "Entregado"
+        return "Entregado"
 
     df["Status"] = df.apply(status_calc, axis=1)
 
-    # --- Fechas base (Fecha creacion) ---
+    # --- Fechas base (Fecha creacion) ---  (FormatoFecha + Calendario)
     df["Fecha creacion"] = pd.to_datetime(
         df["Fecha creacion"], errors="coerce", dayfirst=True
     )
@@ -371,7 +369,7 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
     iso = df["Fecha creacion"].dt.isocalendar()
     df["Año"] = df["Fecha creacion"].dt.year
     df["MesNum"] = df["Fecha creacion"].dt.month
-    df["Mes"] = df["Fecha creacion"].dt.strftime("%B")
+    df["Mes"] = df["Fecha creacion"].dt.strftime("%B")  # Mes texto como en Calendario[Mes]
     df["AñoMes"] = df["Fecha creacion"].dt.strftime("%Y-%m")
     df["Día"] = df["Fecha creacion"].dt.day
     df["Nombre Día"] = df["Fecha creacion"].dt.strftime("%A")
@@ -379,23 +377,54 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
         iso["year"].astype(str) + "-" + iso["week"].astype(str).str.zfill(2)
     )
 
-    # --- Fecha contacto (para Activadas) ---
+    # --- Fecha contacto (por si después la necesitas) ---
     df["Fecha contacto"] = pd.to_datetime(
         df["Fecha contacto"], errors="coerce", dayfirst=True
     )
     df["MesContactoNum"] = df["Fecha contacto"].dt.month
 
-    return df
+    # --- Supervisor vacío -> "ENCUBADORA" (Encubadora step en M) ---
+    df["Jefe directo"] = df["Jefe directo"].fillna("").str.strip()
+    df["Jefe directo"] = df["Jefe directo"].replace("", "ENCUBADORA")
 
+    return df
 
 @st.cache_data(ttl=1200)
 def build_sin_venta(hoja: pd.DataFrame, consulta: pd.DataFrame) -> pd.DataFrame:
     """
-    Replica la tabla SinVenta original:
-    Hoja1 anti-join Consulta1 por Nombre Completo vs Vendedor.
+    Replica la lógica de la medida SinVenta de Power BI:
+
+    - Empleados:
+        Puesto IN ('ASESOR TELEFONICO 7500','EJECUTIVO TELEFONICO 6500 AM')
+        Están activos y con Jefe (en nuestro caso JefeDirecto != 'ENCUBADORA').
+
+    - Ventas válidas:
+        VentasNC[Estatus] IN {
+            "Back Office",
+            "En entrega",
+            "En preparacion",
+            "Entregado",
+            "Solicitado"
+        }
+
+      Si un empleado solo tiene 'Canc Error', se considera SIN VENTA.
     """
-    tmp = hoja.merge(
-        consulta[["Vendedor"]],
+    # Empleados que entran al conteo de Sin Venta (como tabla Empleados en Power BI)
+    empleados_sinv = hoja[
+        hoja["Puesto"].isin(["ASESOR TELEFONICO 7500", "EJECUTIVO TELEFONICO 6500 AM"])
+    ].copy()
+
+    empleados_sinv = empleados_sinv[empleados_sinv["JefeDirecto"] != "ENCUBADORA"]
+
+    # Ventas válidas según la medida DAX
+    mask_valid_estatus = consulta["Estatus"].isin(
+        ["Back Office", "En entrega", "En preparacion", "Entregado", "Solicitado"]
+    )
+    consulta_valid = consulta[mask_valid_estatus].copy()
+
+    # Anti-join: empleados sin ninguna venta válida en el rango
+    tmp = empleados_sinv.merge(
+        consulta_valid[["Vendedor"]],
         how="left",
         left_on="NombreCompleto",
         right_on="Vendedor",
@@ -405,57 +434,49 @@ def build_sin_venta(hoja: pd.DataFrame, consulta: pd.DataFrame) -> pd.DataFrame:
     sinv.drop(columns=["Vendedor", "_merge"], inplace=True)
     return sinv
 
-
 # -------------------------------------------------
-# KPI HELPERS
+# KPI HELPERS (replican medidas DAX)
 # -------------------------------------------------
-def kpi_activadas(df: pd.DataFrame, mes_sel: str = "All") -> int:
+def kpi_activadas(df: pd.DataFrame) -> int:
     """
-    Activadas (Entregado) usando:
-    - Estatus = 'Entregado'
-    - Mes basado en Fecha contacto (MesContactoNum) y el slicer de Mes.
+    Activadas (Entregado) EXACTAMENTE como en Power BI:
+
+    Activadas =
+    VAR total =
+        COUNTROWS(
+            FILTER(
+                'VentasNC',
+                'VentasNC'[Status] = "Entregado"
+            )
+        )
+
+    Es decir: solo cuenta Status = "Entregado"
+    (incluye Canc Error, porque Status viene como "Entregado" de AggStatus).
     """
     if df.empty:
         return 0
-
-    mask = df["Estatus"] == "Entregado"
-
-    if mes_sel != "All" and "MesContactoNum" in df.columns:
-        month_map = {datetime(2000, m, 1).strftime("%B"): m for m in range(1, 13)}
-        m_num = month_map.get(mes_sel)
-        if m_num is not None:
-            mask = mask & (df["MesContactoNum"] == m_num)
-
-    return int(mask.sum())
-
+    return int((df["Status"] == "Entregado").sum())
 
 def kpi_back(df: pd.DataFrame) -> int:
     return int((df["Estatus"] == "Back Office").sum())
 
-
 def kpi_en_entrega(df: pd.DataFrame) -> int:
     return int((df["Estatus"] == "En entrega").sum())
-
 
 def kpi_en_transito(df: pd.DataFrame) -> int:
     return int((df["Status"] == "En Transito").sum())
 
-
 def kpi_preparacion(df: pd.DataFrame) -> int:
     return int((df["Estatus"] == "En preparacion").sum())
-
 
 def kpi_solicitados(df: pd.DataFrame) -> int:
     return int((df["Estatus"] == "Solicitado").sum())
 
-
 def kpi_total_canc_error(df: pd.DataFrame) -> int:
     return int((df["Estatus"] == "Canc Error").sum())
 
-
 def kpi_total_programadas(df: pd.DataFrame) -> int:
     return int((df["Estatus"] != "Canc Error").sum())
-
 
 def kpi_entregados_sin_venta(df: pd.DataFrame) -> int:
     mask = (df["Estatus"] == "Entregado") & (
@@ -463,10 +484,8 @@ def kpi_entregados_sin_venta(df: pd.DataFrame) -> int:
     )
     return int(mask.sum())
 
-
 def kpi_total_sinventa(df_sinventa: pd.DataFrame) -> int:
     return int(df_sinventa.shape[0])
-
 
 # -------------------------------------------------
 # MAIN APP
@@ -521,21 +540,17 @@ def main():
     )
     ejecutivo_sel = st.sidebar.selectbox("Ejecutivo", ejecutivos, index=0)
 
-    # ---- Construir df para dashboard y df_kpi para Activadas ----
+    # ---- Construir df para dashboard ----
     df = consulta.copy()
-    df_kpi = consulta.copy()
 
     if centro_sel != "All":
         df = df[df["Centro Original"] == centro_sel]
-        df_kpi = df_kpi[df_kpi["Centro Original"] == centro_sel]
 
     if supervisor_sel != "All":
         df = df[df["Jefe directo"] == supervisor_sel]
-        df_kpi = df_kpi[df_kpi["Jefe directo"] == supervisor_sel]
 
     if ejecutivo_sel != "All":
         df = df[df["Vendedor"] == ejecutivo_sel]
-        df_kpi = df_kpi[df_kpi["Vendedor"] == ejecutivo_sel]
 
     if mes_sel != "All":
         df = df[df["Mes"] == mes_sel]
@@ -577,7 +592,8 @@ def main():
             st.metric("En entrega", kpi_en_entrega(df))
             st.metric("En tránsito", kpi_en_transito(df))
         with col3:
-            st.metric("Activadas (Entregado)", kpi_activadas(df_kpi, mes_sel))
+            # EXACTO a Activadas de Power BI (Status = "Entregado")
+            st.metric("Activadas (Entregado)", kpi_activadas(df))
             st.metric("Back Office", kpi_back(df))
 
         st.metric("Entregados sin venta (Validación)", kpi_entregados_sin_venta(df))
@@ -617,7 +633,7 @@ def main():
             )
             df_day = df_back[df_back["Fecha"] == day_sel]
 
-            # Total por hora (todas las personas) – lo dejamos como referencia
+            # Total por hora (todas las personas)
             by_hour_total = df_day.groupby("Hora", as_index=False).size()
             fig_total = px.bar(
                 by_hour_total,
@@ -628,7 +644,7 @@ def main():
             )
             st.plotly_chart(fig_total, use_container_width=True)
 
-            # 👇 Nuevo: comportamiento por hora *y* Jefe directo (equipos)
+            # Comportamiento por hora y Jefe directo (equipos)
             by_hour_team = (
                 df_day.groupby(["Hora", "Jefe directo"], as_index=False)
                 .size()
@@ -640,7 +656,7 @@ def main():
                 x="Hora",
                 y="Total",
                 color="Jefe directo",
-                barmode="group",  # cambia a "stack" si prefieres barras apiladas
+                barmode="group",  # "stack" si las quieres apiladas
                 title=f"Back Office por hora y equipo – {day_sel}",
                 labels={
                     "Total": "Total Back Office",
@@ -656,7 +672,6 @@ def main():
                 file_name=f"backoffice_{fecha_ini}_{fecha_fin}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-
 
     # ==================== TAB 2: CANCELADAS ====================
     with tabs[2]:
@@ -682,6 +697,7 @@ def main():
             )
             df_day = df_canc[df_canc["Fecha"] == day_sel]
 
+            # Total por hora (todas las personas)
             by_hour = df_day.groupby("Hora", as_index=False).size()
             fig2 = px.bar(
                 by_hour,
@@ -691,6 +707,28 @@ def main():
                 labels={"size": "Total Canc Error"},
             )
             st.plotly_chart(fig2, use_container_width=True)
+
+            # 👇 NUEVO: comportamiento por hora y equipo (Jefe directo)
+            by_hour_team = (
+                df_day.groupby(["Hora", "Jefe directo"], as_index=False)
+                .size()
+                .rename(columns={"size": "Total"})
+            )
+
+            fig_team_canc = px.bar(
+                by_hour_team,
+                x="Hora",
+                y="Total",
+                color="Jefe directo",
+                barmode="group",
+                title=f"Canceladas por hora y equipo – {day_sel}",
+                labels={
+                    "Total": "Total Canc Error",
+                    "Hora": "Hora",
+                    "Jefe directo": "Supervisor",
+                },
+            )
+            st.plotly_chart(fig_team_canc, use_container_width=True)
 
             # ---------- Detalle de cancelaciones por Ejecutivo / Jefe directo ----------
             st.subheader("Detalle de cancelaciones (Ejecutivo / Jefe directo)")
@@ -787,47 +825,40 @@ def main():
         if df.empty:
             st.info("Sin datos para los filtros actuales.")
         else:
-            # ---- Resumen por Jefe / Ejecutivo, con desglose de EnTransito ----
-            def resumen_grupo(g):
-                total = len(g)
-                activadas = (g["Status"] == "Entregado").sum()
-                en_transito = (g["Status"] == "En Transito").sum()
+            # ---- Precomputar flags para agregación sin apply ----
+            df_flags = df.copy()
+            df_flags["flag_Activadas"] = (df_flags["Status"] == "Entregado").astype(int)
+            df_flags["flag_EnTransito"] = (df_flags["Status"] == "En Transito").astype(int)
+            df_flags["flag_ET_EnEntrega"] = (
+                (df_flags["Status"] == "En Transito") & (df_flags["Estatus"] == "En entrega")
+            ).astype(int)
+            df_flags["flag_ET_EnPreparacion"] = (
+                (df_flags["Status"] == "En Transito") & (df_flags["Estatus"] == "En preparacion")
+            ).astype(int)
+            df_flags["flag_ET_Solicitado"] = (
+                (df_flags["Status"] == "En Transito") & (df_flags["Estatus"] == "Solicitado")
+            ).astype(int)
+            df_flags["flag_ET_BackOffice"] = (
+                (df_flags["Status"] == "En Transito") & (df_flags["Estatus"] == "Back Office")
+            ).astype(int)
+            df_flags["flag_ET_EntregadoSinVenta"] = (
+                (df_flags["Status"] == "En Transito") & (df_flags["Estatus"] == "Entregado")
+            ).astype(int)
 
-                # Solo los que están En Transito y vemos su Estatus real
-                et_en_entrega = (
-                    (g["Status"] == "En Transito") & (g["Estatus"] == "En entrega")
-                ).sum()
-                et_en_preparacion = (
-                    (g["Status"] == "En Transito") & (g["Estatus"] == "En preparacion")
-                ).sum()
-                et_solicitado = (
-                    (g["Status"] == "En Transito") & (g["Estatus"] == "Solicitado")
-                ).sum()
-                et_backoffice = (
-                    (g["Status"] == "En Transito") & (g["Estatus"] == "Back Office")
-                ).sum()
-                # Entregado pero sin venta → En Transito
-                et_entregado_sin_venta = (
-                    (g["Status"] == "En Transito") & (g["Estatus"] == "Entregado")
-                ).sum()
-
-                return pd.Series(
-                    {
-                        "TotalProgramadas": int(total),
-                        "Activadas": int(activadas),
-                        "EnTransito": int(en_transito),
-                        "ET En entrega": int(et_en_entrega),
-                        "ET En preparacion": int(et_en_preparacion),
-                        "ET Solicitado": int(et_solicitado),
-                        "ET Back Office": int(et_backoffice),
-                        "ET Entregado sin venta": int(et_entregado_sin_venta),
-                    }
-                )
+            agg_dict = {
+                "TotalProgramadas": ("Folio", "count"),
+                "Activadas": ("flag_Activadas", "sum"),
+                "EnTransito": ("flag_EnTransito", "sum"),
+                "ET En entrega": ("flag_ET_EnEntrega", "sum"),
+                "ET En preparacion": ("flag_ET_EnPreparacion", "sum"),
+                "ET Solicitado": ("flag_ET_Solicitado", "sum"),
+                "ET Back Office": ("flag_ET_BackOffice", "sum"),
+                "ET Entregado sin venta": ("flag_ET_EntregadoSinVenta", "sum"),
+            }
 
             grouped = (
-                df.groupby(["Jefe directo", "Vendedor"])
-                .apply(resumen_grupo)
-                .reset_index()
+                df_flags.groupby(["Jefe directo", "Vendedor"], as_index=False)
+                .agg(**agg_dict)
                 .rename(columns={"Vendedor": "Ejecutivo"})
             )
 
@@ -865,8 +896,8 @@ def main():
                     "Fecha",
                     "Hora",
                     "Centro",
-                    "Estatus",   # estatus real: En entrega, Back Office, etc.
-                    "Status",    # columna calculada: En Transito / Entregado
+                    "Estatus",
+                    "Status",
                     "Venta",
                 ]
                 if c in df.columns
@@ -920,7 +951,6 @@ def main():
                 file_name=f"sin_venta_{fecha_ini}_{fecha_fin}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-
 
 if __name__ == "__main__":
     main()

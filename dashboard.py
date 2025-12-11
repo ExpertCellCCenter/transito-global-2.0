@@ -8,6 +8,11 @@ from io import BytesIO
 from openpyxl.utils import get_column_letter
 
 # -------------------------------------------------
+# GLOBAL CONSTANTS
+# -------------------------------------------------
+EXCLUDED_VENDOR = "ABASTECEDORA Y SUMINISTROS ORTEGA/ISABEL VALDEZ JIMENEZ"
+
+# -------------------------------------------------
 # CONFIG STREAMLIT
 # -------------------------------------------------
 st.set_page_config(
@@ -246,6 +251,9 @@ def load_hoja1():
     # Columna Coordinador igual a JefeDirecto
     df["Coordinador"] = df["JefeDirecto"]
 
+    # EXCLUIR proveedor externo de todo el modelo de empleados
+    df = df[df["NombreCompleto"].str.upper() != EXCLUDED_VENDOR].copy()
+
     return df
 
 @st.cache_data(ttl=1200)   # 20 minutes
@@ -290,6 +298,10 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip()
             df[col] = df[col].replace({"nan": np.nan, "None": np.nan})
+
+    # EXCLUIR proveedor externo de TODAS las ventas
+    if "Vendedor" in df.columns:
+        df = df[df["Vendedor"].str.upper() != EXCLUDED_VENDOR].copy()
 
     # --- Centro Original (igual a AggCentroOriginacion en M) ---
     df["Centro Original"] = np.nan
@@ -338,10 +350,6 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
     df.drop(columns=["Nombre Completo"], inplace=True, errors="ignore")
 
     # --- Status calculado EXACTO al M (AggStatus) ---
-    #   if Estatus in (En entrega, En preparacion, Solicitado, Back Office) => "En Transito"
-    #   else if Estatus = "Entregado" and Venta null/"" => "En Transito"
-    #   else => "Entregado"
-    #  Esto hace que "Canc Error" tenga Status = "Entregado", igual que en tu Power BI.
     def status_calc(row):
         est = row.get("Estatus")
         venta = row.get("Venta")
@@ -369,7 +377,7 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
     iso = df["Fecha creacion"].dt.isocalendar()
     df["Año"] = df["Fecha creacion"].dt.year
     df["MesNum"] = df["Fecha creacion"].dt.month
-    df["Mes"] = df["Fecha creacion"].dt.strftime("%B")  # Mes texto como en Calendario[Mes]
+    df["Mes"] = df["Fecha creacion"].dt.strftime("%B")
     df["AñoMes"] = df["Fecha creacion"].dt.strftime("%Y-%m")
     df["Día"] = df["Fecha creacion"].dt.day
     df["Nombre Día"] = df["Fecha creacion"].dt.strftime("%A")
@@ -390,28 +398,48 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
     return df
 
 # -------------------------------------------------
-# SIN VENTA (replicando medida DAX)
+# SIN VENTA (replicando medida DAX, mes actual)
 # -------------------------------------------------
 @st.cache_data(ttl=1200)
-def build_sin_venta(hoja: pd.DataFrame, consulta: pd.DataFrame) -> pd.DataFrame:
+def build_sin_venta(
+    hoja: pd.DataFrame,
+    consulta: pd.DataFrame,
+    ref_date: date,
+) -> pd.DataFrame:
     """
-    Replica la lógica de la medida SinVenta de Power BI.
+    Replica la lógica de la medida SinVenta de Power BI, pero
+    tomando solo las ventas del MES del ref_date (mes actual del dashboard).
+
+    - Empleados base: puestos 7500 y 6500 AM, activos, con jefe.
+    - Ventas válidas: Estatus IN
+        {"Back Office","En entrega","En preparacion","Entregado","Solicitado"}
+    - Sin Venta: empleados que NO tengan ninguna venta válida en ese mes.
     """
 
-    # 1) Empleados base (como tabla Empleados en Power BI)
-    #    Puestos: 'ASESOR TELEFONICO 7500', 'EJECUTIVO TELEFONICO 6500 AM'
+    # --- 1) Empleados base (como tabla Empleados en Power BI) ---
     empleados_sinv = hoja[
         hoja["Puesto"].isin(["ASESOR TELEFONICO 7500", "EJECUTIVO TELEFONICO 6500 AM"])
     ].copy()
 
-    # Quitamos los que no tienen jefe (en PQ: Jefe Inmediato <> '')
-    # Aquí los que no tenían jefe se convirtieron en 'ENCUBADORA'
+    # Quitar ENCUBADORA (sin jefe)
     empleados_sinv = empleados_sinv[empleados_sinv["JefeDirecto"] != "ENCUBADORA"]
 
-    # Empleados únicos por nombre
+    # Excluir proveedor externo (por si acaso)
+    empleados_sinv = empleados_sinv[
+        empleados_sinv["NombreCompleto"].str.upper() != EXCLUDED_VENDOR
+    ]
+
+    # Únicos por nombre
     empleados_sinv = empleados_sinv.drop_duplicates(subset=["NombreCompleto"])
 
-    # 2) Ventas válidas según la medida DAX
+    # --- 2) Ventas válidas SOLO del mes de ref_date ---
+    year_ref = ref_date.year
+    month_ref = ref_date.month
+
+    fechas = pd.to_datetime(consulta["Fecha creacion"], errors="coerce")
+    mask_mes = (fechas.dt.year == year_ref) & (fechas.dt.month == month_ref)
+    ventas_mes = consulta.loc[mask_mes].copy()
+
     valid_status = [
         "Back Office",
         "En entrega",
@@ -419,14 +447,14 @@ def build_sin_venta(hoja: pd.DataFrame, consulta: pd.DataFrame) -> pd.DataFrame:
         "Entregado",
         "Solicitado",
     ]
-    consulta_valid = consulta[consulta["Estatus"].isin(valid_status)].copy()
+    ventas_validas = ventas_mes[ventas_mes["Estatus"].isin(valid_status)].copy()
 
-    # Nos quedamos solo con Vendedor único
-    consulta_valid = consulta_valid[["Vendedor"]].drop_duplicates()
+    # Únicos por vendedor con al menos una venta válida en el mes
+    ventas_validas = ventas_validas[["Vendedor"]].drop_duplicates()
 
-    # 3) Anti-join: empleados sin ninguna venta válida en el rango
+    # --- 3) Anti-join: empleados sin ninguna venta válida en el mes ---
     tmp = empleados_sinv.merge(
-        consulta_valid,
+        ventas_validas,
         how="left",
         left_on="NombreCompleto",
         right_on="Vendedor",
@@ -445,14 +473,7 @@ def kpi_activadas(df: pd.DataFrame) -> int:
     """
     Activadas (Entregado) EXACTAMENTE como en Power BI:
 
-    Activadas =
-    VAR total =
-        COUNTROWS(
-            FILTER(
-                'VentasNC',
-                'VentasNC'[Status] = "Entregado"
-            )
-        )
+    Activadas = COUNTROWS( VentasNC WHERE Status = "Entregado" )
     """
     if df.empty:
         return 0
@@ -477,6 +498,7 @@ def kpi_total_canc_error(df: pd.DataFrame) -> int:
     return int((df["Estatus"] == "Canc Error").sum())
 
 def kpi_total_programadas(df: pd.DataFrame) -> int:
+    # Igual que la medida "Total Programadas" en DAX
     return int((df["Estatus"] != "Canc Error").sum())
 
 def kpi_entregados_sin_venta(df: pd.DataFrame) -> int:
@@ -512,7 +534,8 @@ def main():
         hoja = load_hoja1()
         consulta_raw = load_consulta1(fecha_ini, fecha_fin)
         consulta = transform_consulta1(consulta_raw, hoja)
-        sinventa = build_sin_venta(hoja, consulta)
+        # Sin Venta calculado usando MES del fecha_fin
+        sinventa = build_sin_venta(hoja, consulta, fecha_fin)
 
     # ---- Filtros de Centro, Supervisor, Mes ----
     centros = ["All"] + sorted(
@@ -536,20 +559,15 @@ def main():
     if mes_sel != "All":
         df_for_exec = df_for_exec[df_for_exec["Mes"] == mes_sel]
 
-    # Excluir del filtro al ejecutivo "ABASTECEDORA Y SUMINISTROS ORTEGA/ISABEL VALDEZ JIMENEZ"
-    raw_execs = df_for_exec["Vendedor"].dropna().unique().tolist()
+    # Excluir proveedor externo del filtro de Ejecutivo (doble seguridad)
+    df_for_exec = df_for_exec[
+        df_for_exec["Vendedor"].str.upper() != EXCLUDED_VENDOR
+    ]
 
-    ejecutivos_filtrados = []
-    for e in raw_execs:
-        nombre = str(e).strip()
-        # si el nombre contiene ese texto (ignorando mayúsculas/minúsculas), lo excluimos
-        if "abastecedora y suministros ortega/isabel valdez jimenez" in nombre.lower():
-            continue
-        ejecutivos_filtrados.append(nombre)
-
-    ejecutivos = ["All"] + sorted(ejecutivos_filtrados)
+    ejecutivos = ["All"] + sorted(
+        [e for e in df_for_exec["Vendedor"].dropna().unique().tolist()]
+    )
     ejecutivo_sel = st.sidebar.selectbox("Ejecutivo", ejecutivos, index=0)
-
 
     # ---- Construir df para dashboard ----
     df = consulta.copy()
@@ -566,17 +584,13 @@ def main():
     if mes_sel != "All":
         df = df[df["Mes"] == mes_sel]
 
-    # -------- SinVenta filtrado --------
+    # -------- SinVenta filtrado por supervisor (si aplica) --------
     sinv_fil = sinventa.copy()
     if supervisor_sel != "All":
         sinv_fil = sinv_fil[sinv_fil["JefeDirecto"] == supervisor_sel]
 
-    # excluir ENCUBADORA
+    # ENCUBADORA ya está filtrado en build_sin_venta, pero lo dejamos por seguridad
     sinv_fil = sinv_fil[sinv_fil["JefeDirecto"] != "ENCUBADORA"]
-
-    # excluir supervisores de Sin Venta (NombreCompleto igual a Jefe directo en detalle)
-    sup_con_detalle = df["Jefe directo"].dropna().unique()
-    sinv_fil = sinv_fil[~sinv_fil["NombreCompleto"].isin(sup_con_detalle)]
 
     # ----------- Tabs -----------
     tabs = st.tabs(
@@ -667,7 +681,7 @@ def main():
                 x="Hora",
                 y="Total",
                 color="Jefe directo",
-                barmode="group",  # "stack" si las quieres apiladas
+                barmode="group",
                 title=f"Back Office por hora y equipo – {day_sel}",
                 labels={
                     "Total": "Total Back Office",
@@ -776,6 +790,7 @@ def main():
     with tabs[3]:
         st.subheader("Programadas por semana")
 
+        # Programadas = Estatus <> "Canc Error" (mismo concepto en todo el proyecto)
         df_prog = df[df["Estatus"] != "Canc Error"]
         if df_prog.empty:
             st.info("No hay programadas para los filtros actuales.")
@@ -810,21 +825,29 @@ def main():
                 .size()
                 .rename(columns={"size": "Total Programadas"})
                 .sort_values("Total Programadas", ascending=False)
-                .head(30)
+                .head(30)  # top 30 ejecutivos
             )
+
+            # Altura dinámica para que se vean todos los nombres
+            n_exec = len(by_exec)
+            row_height = 26  # px por barra aprox
+            fig_height = max(400, n_exec * row_height + 120)
+
             fig = px.bar(
                 by_exec,
                 x="Total Programadas",
                 y="Vendedor",
                 orientation="h",
-                title="Top Ejecutivos Global",
+                title="Top Ejecutivos Global (Programadas)",
                 labels={"Vendedor": "Ejecutivo"},
-                text="Vendedor",   # mostrar el nombre en la barra
             )
-            fig.update_traces(
-                textposition="outside",
-                cliponaxis=False,
+
+            fig.update_layout(
+                height=fig_height,
+                margin=dict(l=260, r=40, t=60, b=40),
+                yaxis=dict(automargin=True),
             )
+
             st.plotly_chart(fig, use_container_width=True)
 
             st.download_button(
@@ -843,6 +866,10 @@ def main():
         else:
             # ---- Precomputar flags para agregación sin apply ----
             df_flags = df.copy()
+
+            # Programadas = Estatus <> "Canc Error"
+            df_flags["flag_Programada"] = (df_flags["Estatus"] != "Canc Error").astype(int)
+
             df_flags["flag_Activadas"] = (df_flags["Status"] == "Entregado").astype(int)
             df_flags["flag_EnTransito"] = (df_flags["Status"] == "En Transito").astype(int)
             df_flags["flag_ET_EnEntrega"] = (
@@ -861,8 +888,9 @@ def main():
                 (df_flags["Status"] == "En Transito") & (df_flags["Estatus"] == "Entregado")
             ).astype(int)
 
+            # Aggregations: TotalProgramadas usa flag_Programada (mismo que medida DAX)
             agg_dict = {
-                "TotalProgramadas": ("Folio", "count"),
+                "TotalProgramadas": ("flag_Programada", "sum"),
                 "Activadas": ("flag_Activadas", "sum"),
                 "EnTransito": ("flag_EnTransito", "sum"),
                 "ET En entrega": ("flag_ET_EnEntrega", "sum"),
@@ -880,6 +908,7 @@ def main():
 
             st.dataframe(grouped)
 
+            # Pie de Programadas por supervisor usando TotalProgramadas (ya sin Canc Error)
             by_sup = (
                 grouped.groupby("Jefe directo", as_index=False)["TotalProgramadas"]
                 .sum()
@@ -891,10 +920,8 @@ def main():
                 values="TotalProgramadas",
                 title="Programadas por supervisor",
             )
-            fig.update_traces(
-                textposition="inside",
-                textinfo="label+percent",
-            )
+            fig.update_traces(textposition="inside", textinfo="label+percent")
+            fig.update_layout(showlegend=True)
             st.plotly_chart(fig, use_container_width=True)
 
             st.download_button(
@@ -954,7 +981,7 @@ def main():
 
     # ==================== TAB 6: SIN VENTA ====================
     with tabs[6]:
-        st.subheader("Ejecutivos sin venta")
+        st.subheader("Ejecutivos sin venta (mes actual)")
 
         total_sinv = kpi_total_sinventa(sinv_fil)
         st.metric("Total ejecutivos sin venta", total_sinv)
@@ -967,7 +994,9 @@ def main():
 
             st.download_button(
                 "Descargar Sin Venta (Excel)",
-                data=df_to_excel_bytes(df_sinv[["JefeDirecto", "NombreCompleto"]], "SinVenta"),
+                data=df_to_excel_bytes(
+                    df_sinv[["JefeDirecto", "NombreCompleto"]], "SinVenta"
+                ),
                 file_name=f"sin_venta_{fecha_ini}_{fecha_fin}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )

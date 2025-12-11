@@ -416,7 +416,7 @@ def build_sin_venta(
     - Sin Venta: empleados que NO tengan ninguna venta válida en ese mes.
     """
 
-    # --- 1) Empleados base (como tabla Empleados en Power BI) ---
+    # --- 1) Empleados base ---
     empleados_sinv = hoja[
         hoja["Puesto"].isin(["ASESOR TELEFONICO 7500", "EJECUTIVO TELEFONICO 6500 AM"])
     ].copy()
@@ -472,7 +472,6 @@ def build_sin_venta(
 def kpi_activadas(df: pd.DataFrame) -> int:
     """
     Activadas (Entregado) EXACTAMENTE como en Power BI:
-
     Activadas = COUNTROWS( VentasNC WHERE Status = "Entregado" )
     """
     if df.empty:
@@ -906,9 +905,37 @@ def main():
                 .rename(columns={"Vendedor": "Ejecutivo"})
             )
 
-            st.dataframe(grouped)
+            # Ordenar por supervisor y ejecutivo
+            grouped = grouped.sort_values(["Jefe directo", "Ejecutivo"])
 
-            # Pie de Programadas por supervisor usando TotalProgramadas (ya sin Canc Error)
+            # ---------- Fila TOTAL (como en Power BI) ----------
+            metric_cols = [
+                "TotalProgramadas",
+                "Activadas",
+                "EnTransito",
+                "ET En entrega",
+                "ET En preparacion",
+                "ET Solicitado",
+                "ET Back Office",
+                "ET Entregado sin venta",
+            ]
+
+            total_row = {
+                "Jefe directo": "Total",
+                "Ejecutivo": "",
+            }
+            for col in metric_cols:
+                total_row[col] = int(grouped[col].sum())
+
+            grouped_with_total = pd.concat(
+                [grouped, pd.DataFrame([total_row])],
+                ignore_index=True,
+            )
+
+            # Mostrar tabla con la fila Total al final
+            st.dataframe(grouped_with_total)
+
+            # Pie de Programadas por supervisor usando solo supervisores reales
             by_sup = (
                 grouped.groupby("Jefe directo", as_index=False)["TotalProgramadas"]
                 .sum()
@@ -926,7 +953,7 @@ def main():
 
             st.download_button(
                 "Descargar detalle general (Excel)",
-                data=df_to_excel_bytes(grouped, "DetalleGeneral"),
+                data=df_to_excel_bytes(grouped_with_total, "DetalleGeneral"),
                 file_name=f"detalle_general_{fecha_ini}_{fecha_fin}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )

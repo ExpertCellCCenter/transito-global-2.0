@@ -341,7 +341,7 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
     #   if Estatus in (En entrega, En preparacion, Solicitado, Back Office) => "En Transito"
     #   else if Estatus = "Entregado" and Venta null/"" => "En Transito"
     #   else => "Entregado"
-    #  OJO: Esto hace que "Canc Error" tenga Status = "Entregado", igual que en tu Power BI.
+    #  Esto hace que "Canc Error" tenga Status = "Entregado", igual que en tu Power BI.
     def status_calc(row):
         est = row.get("Estatus")
         venta = row.get("Venta")
@@ -389,49 +389,53 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
 
     return df
 
+# -------------------------------------------------
+# SIN VENTA (replicando medida DAX)
+# -------------------------------------------------
 @st.cache_data(ttl=1200)
 def build_sin_venta(hoja: pd.DataFrame, consulta: pd.DataFrame) -> pd.DataFrame:
     """
-    Replica la lógica de la medida SinVenta de Power BI:
-
-    - Empleados:
-        Puesto IN ('ASESOR TELEFONICO 7500','EJECUTIVO TELEFONICO 6500 AM')
-        Están activos y con Jefe (en nuestro caso JefeDirecto != 'ENCUBADORA').
-
-    - Ventas válidas:
-        VentasNC[Estatus] IN {
-            "Back Office",
-            "En entrega",
-            "En preparacion",
-            "Entregado",
-            "Solicitado"
-        }
-
-      Si un empleado solo tiene 'Canc Error', se considera SIN VENTA.
+    Replica la lógica de la medida SinVenta de Power BI.
     """
-    # Empleados que entran al conteo de Sin Venta (como tabla Empleados en Power BI)
+
+    # 1) Empleados base (como tabla Empleados en Power BI)
+    #    Puestos: 'ASESOR TELEFONICO 7500', 'EJECUTIVO TELEFONICO 6500 AM'
     empleados_sinv = hoja[
         hoja["Puesto"].isin(["ASESOR TELEFONICO 7500", "EJECUTIVO TELEFONICO 6500 AM"])
     ].copy()
 
+    # Quitamos los que no tienen jefe (en PQ: Jefe Inmediato <> '')
+    # Aquí los que no tenían jefe se convirtieron en 'ENCUBADORA'
     empleados_sinv = empleados_sinv[empleados_sinv["JefeDirecto"] != "ENCUBADORA"]
 
-    # Ventas válidas según la medida DAX
-    mask_valid_estatus = consulta["Estatus"].isin(
-        ["Back Office", "En entrega", "En preparacion", "Entregado", "Solicitado"]
-    )
-    consulta_valid = consulta[mask_valid_estatus].copy()
+    # Empleados únicos por nombre
+    empleados_sinv = empleados_sinv.drop_duplicates(subset=["NombreCompleto"])
 
-    # Anti-join: empleados sin ninguna venta válida en el rango
+    # 2) Ventas válidas según la medida DAX
+    valid_status = [
+        "Back Office",
+        "En entrega",
+        "En preparacion",
+        "Entregado",
+        "Solicitado",
+    ]
+    consulta_valid = consulta[consulta["Estatus"].isin(valid_status)].copy()
+
+    # Nos quedamos solo con Vendedor único
+    consulta_valid = consulta_valid[["Vendedor"]].drop_duplicates()
+
+    # 3) Anti-join: empleados sin ninguna venta válida en el rango
     tmp = empleados_sinv.merge(
-        consulta_valid[["Vendedor"]],
+        consulta_valid,
         how="left",
         left_on="NombreCompleto",
         right_on="Vendedor",
         indicator=True,
     )
+
     sinv = tmp[tmp["_merge"] == "left_only"].copy()
     sinv.drop(columns=["Vendedor", "_merge"], inplace=True)
+
     return sinv
 
 # -------------------------------------------------
@@ -449,9 +453,6 @@ def kpi_activadas(df: pd.DataFrame) -> int:
                 'VentasNC'[Status] = "Entregado"
             )
         )
-
-    Es decir: solo cuenta Status = "Entregado"
-    (incluye Canc Error, porque Status viene como "Entregado" de AggStatus).
     """
     if df.empty:
         return 0
@@ -535,10 +536,20 @@ def main():
     if mes_sel != "All":
         df_for_exec = df_for_exec[df_for_exec["Mes"] == mes_sel]
 
-    ejecutivos = ["All"] + sorted(
-        [e for e in df_for_exec["Vendedor"].dropna().unique().tolist()]
-    )
+    # Excluir del filtro al ejecutivo "ABASTECEDORA Y SUMINISTROS ORTEGA/ISABEL VALDEZ JIMENEZ"
+    raw_execs = df_for_exec["Vendedor"].dropna().unique().tolist()
+
+    ejecutivos_filtrados = []
+    for e in raw_execs:
+        nombre = str(e).strip()
+        # si el nombre contiene ese texto (ignorando mayúsculas/minúsculas), lo excluimos
+        if "abastecedora y suministros ortega/isabel valdez jimenez" in nombre.lower():
+            continue
+        ejecutivos_filtrados.append(nombre)
+
+    ejecutivos = ["All"] + sorted(ejecutivos_filtrados)
     ejecutivo_sel = st.sidebar.selectbox("Ejecutivo", ejecutivos, index=0)
+
 
     # ---- Construir df para dashboard ----
     df = consulta.copy()
@@ -708,7 +719,7 @@ def main():
             )
             st.plotly_chart(fig2, use_container_width=True)
 
-            # 👇 NUEVO: comportamiento por hora y equipo (Jefe directo)
+            # Comportamiento por hora y equipo (Jefe directo)
             by_hour_team = (
                 df_day.groupby(["Hora", "Jefe directo"], as_index=False)
                 .size()
@@ -808,6 +819,11 @@ def main():
                 orientation="h",
                 title="Top Ejecutivos Global",
                 labels={"Vendedor": "Ejecutivo"},
+                text="Vendedor",   # mostrar el nombre en la barra
+            )
+            fig.update_traces(
+                textposition="outside",
+                cliponaxis=False,
             )
             st.plotly_chart(fig, use_container_width=True)
 
@@ -874,6 +890,10 @@ def main():
                 names="Supervisor",
                 values="TotalProgramadas",
                 title="Programadas por supervisor",
+            )
+            fig.update_traces(
+                textposition="inside",
+                textinfo="label+percent",
             )
             st.plotly_chart(fig, use_container_width=True)
 

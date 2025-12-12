@@ -958,7 +958,7 @@ def main():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
-            # ---- Detalle línea a línea de En Transito ----
+            # --- Detalle línea a línea de En Transito ---
             st.subheader("Detalle de registros En Tránsito")
 
             cols_det_en_t = [

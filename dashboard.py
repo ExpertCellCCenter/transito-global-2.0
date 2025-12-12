@@ -7,9 +7,9 @@ import plotly.express as px
 from io import BytesIO
 from openpyxl.utils import get_column_letter
 
-# -------------------------------------------------
+# ------------------------------------------------
 # GLOBAL CONSTANTS
-# -------------------------------------------------
+# ------------------------------------------------
 EXCLUDED_VENDOR = "ABASTECEDORA Y SUMINISTROS ORTEGA/ISABEL VALDEZ JIMENEZ"
 
 # -------------------------------------------------

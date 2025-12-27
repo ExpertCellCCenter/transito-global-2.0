@@ -793,13 +793,16 @@ def main():
         if df_prog.empty:
             st.info("No hay programadas para los filtros actuales.")
         else:
-            by_exec = (
+            # ✅ Ranking completo: TODOS los ejecutivos (sin limitar a 30)
+            by_exec_all = (
                 df_prog.groupby("Vendedor", as_index=False)
                 .size()
                 .rename(columns={"size": "Total Programadas"})
                 .sort_values("Total Programadas", ascending=False)
-                .head(30)
             )
+
+            # ✅ Mantener la gráfica ligera y legible: Top 30 en la gráfica
+            by_exec = by_exec_all.head(30)
 
             n_exec = len(by_exec)
             row_height = 26
@@ -820,12 +823,18 @@ def main():
             )
             st.plotly_chart(fig, use_container_width=True)
 
+            # ✅ Mostrar el ranking COMPLETO (todos los ejecutivos)
+            st.subheader("Ranking completo (todos los ejecutivos)")
+            st.dataframe(by_exec_all, use_container_width=True)
+
+            # ✅ Descargar el ranking COMPLETO (todos)
             st.download_button(
                 "Descargar Top Ejecutivos (Excel)",
-                data=df_to_excel_bytes(by_exec, "TopEjecutivos"),
+                data=df_to_excel_bytes(by_exec_all, "TopEjecutivos"),
                 file_name=f"top_ejecutivos_{fecha_ini}_{fecha_fin}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
+
 
     # ==================== TAB 5: DETALLE GENERAL ====================
     with tabs[5]:

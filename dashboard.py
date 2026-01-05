@@ -12,6 +12,10 @@ from openpyxl.utils import get_column_letter
 # -------------------------------------------------
 EXCLUDED_VENDOR = "ABASTECEDORA Y SUMINISTROS ORTEGA/ISABEL VALDEZ JIMENEZ"
 
+# ✅ Base window MUST match Power BI query exactly
+PBI_START = date(2025, 10, 1)
+PBI_END = date(2026, 1, 31)
+
 # -------------------------------------------------
 # CONFIG STREAMLIT
 # -------------------------------------------------
@@ -282,10 +286,13 @@ def load_consulta1(fecha_ini: date, fecha_fin: date) -> pd.DataFrame:
 def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFrame:
     df = df_raw.copy()
 
-    for col in ["Centro", "Estatus", "Back Office", "Venta", "Vendedor", "Cliente"]:
+    for col in ["Centro", "Estatus", "Back Office", "Vendedor", "Cliente"]:
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip()
             df[col] = df[col].replace({"nan": np.nan, "None": np.nan})
+
+    if "Venta" in df.columns:
+        df["Venta"] = df["Venta"].replace({"nan": np.nan, "None": np.nan})
 
     if "Vendedor" in df.columns:
         df = df[df["Vendedor"].str.upper() != EXCLUDED_VENDOR].copy()
@@ -315,7 +322,14 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
 
     df["Region"] = df["Centro"].apply(region_from_centro)
 
-    hoja_join = hoja.rename(
+    empleados_join = hoja[
+        hoja["Puesto"].isin(["ASESOR TELEFONICO 7500", "EJECUTIVO TELEFONICO 6500 AM"])
+    ].copy()
+    empleados_join = empleados_join[empleados_join["JefeDirecto"] != "ENCUBADORA"]
+    empleados_join = empleados_join[empleados_join["NombreCompleto"].str.upper() != EXCLUDED_VENDOR]
+    empleados_join = empleados_join.drop_duplicates(subset=["NombreCompleto"])
+
+    hoja_join = empleados_join.rename(
         columns={
             "NombreCompleto": "Nombre Completo",
             "JefeDirecto": "Jefe directo",
@@ -337,7 +351,7 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
         if est in ("En entrega", "En preparacion", "Solicitado", "Back Office"):
             return "En Transito"
 
-        venta_vacia = pd.isna(venta) or str(venta).strip() == ""
+        venta_vacia = pd.isna(venta) or (isinstance(venta, str) and venta == "")
 
         if est == "Entregado" and venta_vacia:
             return "En Transito"
@@ -362,7 +376,7 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
     df["Fecha contacto"] = pd.to_datetime(df["Fecha contacto"], errors="coerce", dayfirst=True)
     df["MesContactoNum"] = df["Fecha contacto"].dt.month
 
-    df["Jefe directo"] = df["Jefe directo"].fillna("").str.strip()
+    df["Jefe directo"] = df["Jefe directo"].fillna("").astype(str).str.strip()
     df["Jefe directo"] = df["Jefe directo"].replace("", "ENCUBADORA")
 
     return df
@@ -424,20 +438,21 @@ def kpi_preparacion(df: pd.DataFrame) -> int:
 def kpi_solicitados(df: pd.DataFrame) -> int:
     return int((df["Estatus"] == "Solicitado").sum())
 
-def kpi_total_canc_error(df: pd.DataFrame) -> int:
-    return int((df["Estatus"] == "Canc Error").sum())
-
-def kpi_total_programadas(df: pd.DataFrame) -> int:
-    return int((df["Estatus"] != "Canc Error").sum())
-
-def kpi_entregados_sin_venta(df: pd.DataFrame) -> int:
-    mask = (df["Estatus"] == "Entregado") & (
-        df["Venta"].isna() | (df["Venta"].astype(str).str.strip() == "")
-    )
-    return int(mask.sum())
-
 def kpi_total_sinventa(df_sinventa: pd.DataFrame) -> int:
     return int(df_sinventa.shape[0])
+
+# ✅ EXACT Power BI DAX logic (ALL(VentasNC))
+def kpi_validacion_pbi_all(ventasnc_all: pd.DataFrame) -> int:
+    if ventasnc_all.empty or "Estatus" not in ventasnc_all.columns or "Venta" not in ventasnc_all.columns:
+        return 0
+
+    est_ok = ventasnc_all["Estatus"].astype(str).str.strip().eq("Entregado")
+
+    venta = ventasnc_all["Venta"]
+    blank_or_trim_empty = venta.isna() | venta.astype(str).str.strip().eq("")
+
+    total = int((est_ok & blank_or_trim_empty).sum())
+    return total
 
 # -------------------------------------------------
 # MAIN APP
@@ -445,11 +460,15 @@ def kpi_total_sinventa(df_sinventa: pd.DataFrame) -> int:
 def main():
     st.title("Dashboard Transito Global  – CC")
 
-    # ----------- Sidebar: rangos de fecha y filtros globales -----------
     st.sidebar.header("Filtros")
 
-    default_start = date(2025, 10, 1)
-    default_end = date.today()
+    if st.sidebar.button("🔄 Actualizar datos"):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.rerun()
+
+    default_start = PBI_START
+    default_end = PBI_END
 
     fecha_ini = st.sidebar.date_input("Fecha inicio", default_start)
     fecha_fin = st.sidebar.date_input("Fecha fin", default_end)
@@ -460,8 +479,19 @@ def main():
 
     with st.spinner("Cargando datos desde SQL..."):
         hoja = load_hoja1()
-        consulta_raw = load_consulta1(fecha_ini, fecha_fin)
-        consulta = transform_consulta1(consulta_raw, hoja)
+
+        # ✅ Load SAME base window as Power BI
+        consulta_raw_base = load_consulta1(PBI_START, PBI_END)
+        consulta_base = transform_consulta1(consulta_raw_base, hoja)
+
+        # ✅ Validación ignores slicers (ALL(VentasNC))
+        validacion_pbi = kpi_validacion_pbi_all(consulta_base)
+
+        # ✅ Apply Streamlit date range AFTER base load (rest of dashboard)
+        consulta = consulta_base[
+            (consulta_base["Fecha"] >= fecha_ini) & (consulta_base["Fecha"] <= fecha_fin)
+        ].copy()
+
         sinventa = build_sin_venta(hoja, consulta, fecha_fin)
 
     # ---- Filtros de Centro, Supervisor, Mes ----
@@ -473,7 +503,7 @@ def main():
     supervisor_sel = st.sidebar.selectbox("Supervisor", supervisores, index=0)
     mes_sel = st.sidebar.selectbox("Mes (Fecha creación)", meses, index=0)
 
-    # Para opciones de Ejecutivo: mismo contexto que Detalle General
+    # Para opciones de Ejecutivo: mismo contexto que Detalle General (con mes)
     df_for_exec = consulta.copy()
     if centro_sel != "All":
         df_for_exec = df_for_exec[df_for_exec["Centro Original"] == centro_sel]
@@ -486,14 +516,17 @@ def main():
     ejecutivos = ["All"] + sorted([e for e in df_for_exec["Vendedor"].dropna().unique().tolist()])
     ejecutivo_sel = st.sidebar.selectbox("Ejecutivo", ejecutivos, index=0)
 
-    # ---- Construir df para dashboard ----
-    df = consulta.copy()
+    # ---- Construir df BASE (sin filtro de Mes) ----
+    df_no_month = consulta.copy()
     if centro_sel != "All":
-        df = df[df["Centro Original"] == centro_sel]
+        df_no_month = df_no_month[df_no_month["Centro Original"] == centro_sel]
     if supervisor_sel != "All":
-        df = df[df["Jefe directo"] == supervisor_sel]
+        df_no_month = df_no_month[df_no_month["Jefe directo"] == supervisor_sel]
     if ejecutivo_sel != "All":
-        df = df[df["Vendedor"] == ejecutivo_sel]
+        df_no_month = df_no_month[df_no_month["Vendedor"] == ejecutivo_sel]
+
+    # ---- df con filtro de Mes (para el resto del dashboard) ----
+    df = df_no_month.copy()
     if mes_sel != "All":
         df = df[df["Mes"] == mes_sel]
 
@@ -527,7 +560,6 @@ def main():
         with col2:
             st.metric("En entrega", kpi_en_entrega(df))
 
-            # En tránsito destacado
             en_t = kpi_en_transito(df)
             st.markdown(
                 f"""
@@ -542,7 +574,7 @@ def main():
             st.metric("Activadas (Entregado)", kpi_activadas(df))
             st.metric("Back Office", kpi_back(df))
 
-        st.metric("Entregados sin venta (Validación)", kpi_entregados_sin_venta(df))
+        st.metric("Entregados sin venta (Validación)", validacion_pbi)
 
         st.download_button(
             "Descargar detalle (Excel)",
@@ -556,13 +588,11 @@ def main():
         st.subheader("Back Office")
 
         bo_col = df["Back Office"].astype(str).str.strip()
-        # Excluir Canc Error SOLO en este dashboard
         df_back = df[(bo_col != "") & (df["Estatus"] != "Canc Error")].copy()
 
         if df_back.empty:
             st.info("No hay registros con datos en la columna 'Back Office' para los filtros actuales.")
         else:
-            # ---- Totales por día ----
             by_day = df_back.groupby("Fecha", as_index=False).size()
             fig = px.bar(
                 by_day,
@@ -573,7 +603,6 @@ def main():
             )
             st.plotly_chart(fig, use_container_width=True)
 
-            # ✅ DEFAULT DAY = TODAY (if exists) else latest day
             day_options = sorted(by_day["Fecha"].unique())
             today = date.today()
             default_index = day_options.index(today) if today in day_options else len(day_options) - 1
@@ -585,7 +614,6 @@ def main():
             )
             df_day = df_back[df_back["Fecha"] == day_sel]
 
-            # Total por hora (todas las personas)
             by_hour_total = df_day.groupby("Hora", as_index=False).size()
             fig_total = px.bar(
                 by_hour_total,
@@ -596,7 +624,6 @@ def main():
             )
             st.plotly_chart(fig_total, use_container_width=True)
 
-            # Comportamiento por hora y Jefe directo (equipos)
             by_hour_team = (
                 df_day.groupby(["Hora", "Jefe directo"], as_index=False)
                 .size()
@@ -618,7 +645,6 @@ def main():
             )
             st.plotly_chart(fig_team, use_container_width=True)
 
-            # ---- Tabla detalle Back Office (con Cliente y Tel en ese orden) ----
             st.subheader("Detalle Back Office (Ejecutivo / Jefe directo)")
             detalle_cols_bo = [
                 c
@@ -650,7 +676,6 @@ def main():
 
             st.dataframe(df_det_bo)
 
-            # ✅ Export EXACT table
             st.download_button(
                 "Descargar Detalle Back Office (Excel)",
                 data=df_to_excel_bytes(df_det_bo, "DetalleBackOffice"),
@@ -676,7 +701,6 @@ def main():
             )
             st.plotly_chart(fig, use_container_width=True)
 
-            # ✅ DEFAULT DAY = TODAY (if exists) else latest day
             day_options = sorted(by_day["Fecha"].unique())
             today = date.today()
             default_index = day_options.index(today) if today in day_options else len(day_options) - 1
@@ -688,7 +712,6 @@ def main():
             )
             df_day = df_canc[df_canc["Fecha"] == day_sel]
 
-            # Total por hora (todas las personas)
             by_hour = df_day.groupby("Hora", as_index=False).size()
             fig2 = px.bar(
                 by_hour,
@@ -699,7 +722,6 @@ def main():
             )
             st.plotly_chart(fig2, use_container_width=True)
 
-            # Comportamiento por hora y equipo (Jefe directo)
             by_hour_team = (
                 df_day.groupby(["Hora", "Jefe directo"], as_index=False)
                 .size()
@@ -721,7 +743,6 @@ def main():
             )
             st.plotly_chart(fig_team_canc, use_container_width=True)
 
-            # ---------- Detalle de cancelaciones por Ejecutivo / Jefe directo ----------
             st.subheader("Detalle de cancelaciones (Ejecutivo / Jefe directo)")
             detalle_cols = [
                 c
@@ -752,7 +773,6 @@ def main():
 
             st.dataframe(df_det)
 
-            # ✅ Export EXACT table
             st.download_button(
                 "Descargar Detalle Canceladas (Excel)",
                 data=df_to_excel_bytes(df_det, "DetalleCanceladas"),
@@ -764,10 +784,31 @@ def main():
     with tabs[3]:
         st.subheader("Programadas por semana")
 
-        df_prog = df[df["Estatus"] != "Canc Error"]
-        if df_prog.empty:
+        # ✅ Use DF WITHOUT Mes filter so weeks can include Dec days for January's first week
+        df_prog_base = df_no_month[df_no_month["Estatus"] != "Canc Error"].copy()
+
+        if df_prog_base.empty:
             st.info("No hay programadas para los filtros actuales.")
         else:
+            df_prog = df_prog_base
+
+            # ✅ If user selected a month, expand to FULL ISO weeks that intersect that month
+            # (this fixes: first week of January includes Dec 29-31, etc.)
+            if mes_sel != "All":
+                month_rows = df_no_month[df_no_month["Mes"] == mes_sel].copy()
+                if not month_rows.empty:
+                    start_ts = pd.to_datetime(month_rows["Fecha creacion"], errors="coerce").min()
+                    end_ts = pd.to_datetime(month_rows["Fecha creacion"], errors="coerce").max()
+
+                    if pd.notna(start_ts) and pd.notna(end_ts):
+                        week_start = start_ts - pd.Timedelta(days=int(start_ts.weekday()))          # Monday
+                        week_end = end_ts + pd.Timedelta(days=int(6 - end_ts.weekday()))            # Sunday
+
+                        df_prog = df_prog_base[
+                            (df_prog_base["Fecha creacion"] >= week_start)
+                            & (df_prog_base["Fecha creacion"] <= week_end)
+                        ].copy()
+
             by_week = df_prog.groupby("Año Semana", as_index=False).size()
             fig = px.bar(
                 by_week,
@@ -793,7 +834,6 @@ def main():
         if df_prog.empty:
             st.info("No hay programadas para los filtros actuales.")
         else:
-            # ✅ Ranking completo: TODOS los ejecutivos (sin limitar a 30)
             by_exec_all = (
                 df_prog.groupby("Vendedor", as_index=False)
                 .size()
@@ -801,7 +841,6 @@ def main():
                 .sort_values("Total Programadas", ascending=False)
             )
 
-            # ✅ Mantener la gráfica ligera y legible: Top 30 en la gráfica
             by_exec = by_exec_all.head(30)
 
             n_exec = len(by_exec)
@@ -823,18 +862,15 @@ def main():
             )
             st.plotly_chart(fig, use_container_width=True)
 
-            # ✅ Mostrar el ranking COMPLETO (todos los ejecutivos)
             st.subheader("Ranking completo (todos los ejecutivos)")
             st.dataframe(by_exec_all, use_container_width=True)
 
-            # ✅ Descargar el ranking COMPLETO (todos)
             st.download_button(
                 "Descargar Top Ejecutivos (Excel)",
                 data=df_to_excel_bytes(by_exec_all, "TopEjecutivos"),
                 file_name=f"top_ejecutivos_{fecha_ini}_{fecha_fin}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-
 
     # ==================== TAB 5: DETALLE GENERAL ====================
     with tabs[5]:
@@ -923,7 +959,6 @@ def main():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
-            # ---- Detalle línea a línea de En Transito ----
             st.subheader("Detalle de registros En Tránsito")
 
             cols_det_en_t = [

@@ -13,8 +13,8 @@ from openpyxl.utils import get_column_letter
 EXCLUDED_VENDOR = "ABASTECEDORA Y SUMINISTROS ORTEGA/ISABEL VALDEZ JIMENEZ"
 
 # ✅ Base window MUST match Power BI query exactly
-PBI_START = date(2025, 10, 1)
-PBI_END = date(2026, 1, 31)
+PBI_START = date(2025, 11, 1)
+PBI_END = date(2026, 12, 31)
 
 # -------------------------------------------------
 # CONFIG STREAMLIT
@@ -154,6 +154,12 @@ div[data-testid="stDownloadButton"] > button:hover {
 )
 
 # -------------------------------------------------
+# SESSION STATE (control refresh manually)
+# -------------------------------------------------
+if "base_data" not in st.session_state:
+    st.session_state["base_data"] = None
+
+# -------------------------------------------------
 # SMALL HELPER: DF -> EXCEL BYTES (auto-fit + filters)
 # -------------------------------------------------
 def df_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Datos") -> bytes:
@@ -175,6 +181,62 @@ def df_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Datos") -> bytes:
                 if cell.value is not None:
                     max_length = max(max_length, len(str(cell.value)))
             ws.column_dimensions[col_letter].width = max_length + 2
+
+    output.seek(0)
+    return output.getvalue()
+
+# -------------------------------------------------
+# MULTI-SHEET EXCEL (Resumen download incl. En Tránsito detail)
+# -------------------------------------------------
+def _safe_sheet_name(name: str) -> str:
+    invalid = ['\\', '/', '*', '[', ']', ':', '?']
+    out = str(name)
+    for ch in invalid:
+        out = out.replace(ch, "_")
+    out = out.strip() or "Sheet"
+    return out[:31]
+
+def dfs_to_excel_bytes(sheets: dict) -> bytes:
+    """Return an .xlsx (bytes) with multiple sheets, each with autofilter + auto column width."""
+    output = BytesIO()
+    used_names = set()
+
+    def unique_sheet_name(base: str) -> str:
+        base = _safe_sheet_name(base)
+        if base not in used_names:
+            used_names.add(base)
+            return base
+        i = 2
+        while True:
+            suffix = f"_{i}"
+            cand = (base[: (31 - len(suffix))] + suffix) if len(base) + len(suffix) > 31 else (base + suffix)
+            if cand not in used_names:
+                used_names.add(cand)
+                return cand
+            i += 1
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for raw_name, df in sheets.items():
+            sheet_name = unique_sheet_name(raw_name)
+            if df is None:
+                df = pd.DataFrame()
+
+            df.to_excel(writer, index=False, sheet_name=sheet_name)
+            ws = writer.sheets[sheet_name]
+
+            max_row = ws.max_row
+            max_col = ws.max_column
+
+            if max_col > 0 and max_row > 0:
+                ws.auto_filter.ref = f"A1:{get_column_letter(max_col)}{max_row}"
+
+                for col_idx in range(1, max_col + 1):
+                    col_letter = get_column_letter(col_idx)
+                    max_length = 0
+                    for cell in ws[col_letter]:
+                        if cell.value is not None:
+                            max_length = max(max_length, len(str(cell.value)))
+                    ws.column_dimensions[col_letter].width = max_length + 2
 
     output.seek(0)
     return output.getvalue()
@@ -205,8 +267,9 @@ def get_connection():
 
 # -------------------------------------------------
 # LOAD DATA FROM SQL
+# (NO TTL) -> refresh only when user clicks button (we clear cache manually)
 # -------------------------------------------------
-@st.cache_data(ttl=1200)
+@st.cache_data
 def load_hoja1():
     """
     Tabla equivalente a Empleados/Hoja1,
@@ -257,7 +320,7 @@ def load_hoja1():
     df = df[df["NombreCompleto"].str.upper() != EXCLUDED_VENDOR].copy()
     return df
 
-@st.cache_data(ttl=1200)
+@st.cache_data
 def load_consulta1(fecha_ini: date, fecha_fin: date) -> pd.DataFrame:
     """
     Replica VentasNC base pero para el rango seleccionado.
@@ -384,7 +447,7 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
 # -------------------------------------------------
 # SIN VENTA (replicando medida DAX, mes actual)
 # -------------------------------------------------
-@st.cache_data(ttl=1200)
+@st.cache_data
 def build_sin_venta(hoja: pd.DataFrame, consulta: pd.DataFrame, ref_date: date) -> pd.DataFrame:
     empleados_sinv = hoja[
         hoja["Puesto"].isin(["ASESOR TELEFONICO 7500", "EJECUTIVO TELEFONICO 6500 AM"])
@@ -462,37 +525,52 @@ def main():
 
     st.sidebar.header("Filtros")
 
+    # ✅ ONLY refresh SQL data when user clicks this button
     if st.sidebar.button("🔄 Actualizar datos"):
         st.cache_data.clear()
         st.cache_resource.clear()
+        st.session_state["base_data"] = None
         st.rerun()
 
     default_start = PBI_START
-    default_end = PBI_END
+    default_end = min(date.today(), PBI_END)  # ✅ end date defaults to current day
 
     fecha_ini = st.sidebar.date_input("Fecha inicio", default_start)
     fecha_fin = st.sidebar.date_input("Fecha fin", default_end)
+
 
     if fecha_ini > fecha_fin:
         st.sidebar.error("La fecha inicio no puede ser mayor que la fecha fin.")
         return
 
-    with st.spinner("Cargando datos desde SQL..."):
-        hoja = load_hoja1()
+    # ✅ Load SQL base ONLY once per session (or when user clicks refresh)
+    if st.session_state["base_data"] is None:
+        with st.spinner("Cargando datos desde SQL..."):
+            hoja = load_hoja1()
 
-        # ✅ Load SAME base window as Power BI
-        consulta_raw_base = load_consulta1(PBI_START, PBI_END)
-        consulta_base = transform_consulta1(consulta_raw_base, hoja)
+            # ✅ Load SAME base window as Power BI
+            consulta_raw_base = load_consulta1(PBI_START, PBI_END)
+            consulta_base = transform_consulta1(consulta_raw_base, hoja)
 
-        # ✅ Validación ignores slicers (ALL(VentasNC))
-        validacion_pbi = kpi_validacion_pbi_all(consulta_base)
+            # ✅ Validación ignores slicers (ALL(VentasNC))
+            validacion_pbi = kpi_validacion_pbi_all(consulta_base)
 
-        # ✅ Apply Streamlit date range AFTER base load (rest of dashboard)
-        consulta = consulta_base[
-            (consulta_base["Fecha"] >= fecha_ini) & (consulta_base["Fecha"] <= fecha_fin)
-        ].copy()
+            st.session_state["base_data"] = {
+                "hoja": hoja,
+                "consulta_base": consulta_base,
+                "validacion_pbi": validacion_pbi,
+            }
 
-        sinventa = build_sin_venta(hoja, consulta, fecha_fin)
+    hoja = st.session_state["base_data"]["hoja"]
+    consulta_base = st.session_state["base_data"]["consulta_base"]
+    validacion_pbi = st.session_state["base_data"]["validacion_pbi"]
+
+    # ✅ Apply Streamlit date range AFTER base load (rest of dashboard)
+    consulta = consulta_base[
+        (consulta_base["Fecha"] >= fecha_ini) & (consulta_base["Fecha"] <= fecha_fin)
+    ].copy()
+
+    sinventa = build_sin_venta(hoja, consulta, fecha_fin)
 
     # ---- Filtros de Centro, Supervisor, Mes ----
     centros = ["All"] + sorted([c for c in consulta["Centro Original"].dropna().unique().tolist()])
@@ -576,9 +654,40 @@ def main():
 
         st.metric("Entregados sin venta (Validación)", validacion_pbi)
 
+        # ✅ include En Tránsito detail in the same Excel download (extra sheet)
+        cols_en_t_resumen = [
+            c for c in [
+                "Jefe directo",
+                "Vendedor",
+                "Cliente",
+                "Telefono",
+                "Folio",
+                "Fecha",
+                "Hora",
+                "Centro",
+                "Estatus",
+                "Status",
+                "Back Office",
+                "Venta",
+            ]
+            if c in df.columns
+        ]
+        df_en_t_resumen = df[df["Status"] == "En Transito"][cols_en_t_resumen].copy()
+        df_en_t_resumen = df_en_t_resumen.rename(
+            columns={
+                "Vendedor": "Ejecutivo",
+                "Telefono": "Telefono cliente",
+            }
+        )
+
         st.download_button(
             "Descargar detalle (Excel)",
-            data=df_to_excel_bytes(df, "Detalle"),
+            data=dfs_to_excel_bytes(
+                {
+                    "Detalle": df,
+                    "EnTransitoDetalle": df_en_t_resumen,
+                }
+            ),
             file_name=f"detalle_programacion_{fecha_ini}_{fecha_fin}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
@@ -1018,4 +1127,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

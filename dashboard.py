@@ -14,7 +14,7 @@ EXCLUDED_VENDOR = "ABASTECEDORA Y SUMINISTROS ORTEGA/ISABEL VALDEZ JIMENEZ"
 
 # ✅ Base window MUST match Power BI query exactly
 PBI_START = date(2025, 11, 1)
-PBI_END = date(2026, 12, 31)
+PBI_END = date(2026, 1, 31)  # ✅ Power BI M code uses '20260131'
 
 # -------------------------------------------------
 # CONFIG STREAMLIT
@@ -434,7 +434,9 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
     df["AñoMes"] = df["Fecha creacion"].dt.strftime("%Y-%m")
     df["Día"] = df["Fecha creacion"].dt.day
     df["Nombre Día"] = df["Fecha creacion"].dt.strftime("%A")
-    df["Año Semana"] = iso["year"].astype(str) + "-" + iso["week"].astype(str).str.zfill(2)
+
+    # ✅ keep the fix you already approved (prevents Plotly reading "YYYY-02" as "Feb")
+    df["Año Semana"] = iso["year"].astype(str) + "-W" + iso["week"].astype(str).str.zfill(2)
 
     df["Fecha contacto"] = pd.to_datetime(df["Fecha contacto"], errors="coerce", dayfirst=True)
     df["MesContactoNum"] = df["Fecha contacto"].dt.month
@@ -533,11 +535,10 @@ def main():
         st.rerun()
 
     default_start = PBI_START
-    default_end = min(date.today(), PBI_END)  # ✅ end date defaults to current day
+    default_end = min(date.today(), PBI_END)  # ✅ end date defaults to current day (bounded by PBI_END)
 
     fecha_ini = st.sidebar.date_input("Fecha inicio", default_start)
     fecha_fin = st.sidebar.date_input("Fecha fin", default_end)
-
 
     if fecha_ini > fecha_fin:
         st.sidebar.error("La fecha inicio no puede ser mayor que la fecha fin.")
@@ -926,6 +927,7 @@ def main():
                 title="Vista general de programadas por semana",
                 labels={"size": "Total Programadas"},
             )
+            fig.update_xaxes(type="category")
             st.plotly_chart(fig, use_container_width=True)
 
             st.download_button(

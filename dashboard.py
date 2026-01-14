@@ -367,8 +367,18 @@ def load_consulta1(fecha_ini: date, fecha_fin: date) -> pd.DataFrame:
         [Estatus] IN ('En entrega','Canc Error','Entregado',
                       'En preparacion','Back Office','Solicitado');
     """
+
     conn = get_connection()
+
+    # ✅ FIX: avoid SQL 8152 truncation error inside the TVF
+    cur = conn.cursor()
+    cur.execute("SET NOCOUNT ON; SET ANSI_WARNINGS OFF;")
+
     df = pd.read_sql(sql, conn)
+
+    cur.execute("SET ANSI_WARNINGS ON;")
+    cur.close()
+
     return df
 
 # -------------------------------------------------

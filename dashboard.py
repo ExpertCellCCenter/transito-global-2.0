@@ -243,15 +243,12 @@ def dfs_to_excel_bytes(sheets: dict) -> bytes:
 
 # -------------------------------------------------
 # ✅ HELPER (ONLY for Back Office tab): parse Back Office datetime robustly
-# (Back Office field from Rastreo has date + hour)
-# - Tries DD/MM and MM/DD and chooses the one inside the selected window.
 # -------------------------------------------------
 def parse_backoffice_datetime(series: pd.Series, window_start: date | None = None, window_end: date | None = None) -> pd.Series:
     s = series.astype(str).str.strip()
     s = s.replace({"nan": "", "None": "", "NaT": ""})
     s = s.where(s != "", np.nan)
 
-    # Extract datetime substring if embedded in longer text
     if s.notna().any():
         pat = r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\s+\d{1,2}:\d{2}(?::\d{2})?)|(\d{4}[/-]\d{1,2}[/-]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?)"
         ext = s.astype(str).str.extract(pat)
@@ -263,7 +260,6 @@ def parse_backoffice_datetime(series: pd.Series, window_start: date | None = Non
     dt_dayfirst = pd.to_datetime(s2, errors="coerce", dayfirst=True)
     dt_monthfirst = pd.to_datetime(s2, errors="coerce", dayfirst=False)
 
-    # If no window provided, default to dayfirst (MX)
     if window_start is None or window_end is None:
         return dt_dayfirst
 
@@ -274,11 +270,7 @@ def parse_backoffice_datetime(series: pd.Series, window_start: date | None = Non
     in2 = dt_monthfirst.between(w0, w1)
 
     out = dt_dayfirst.copy()
-
-    # If only monthfirst fits -> take monthfirst
     out = out.where(~(in2 & ~in1), dt_monthfirst)
-
-    # If dayfirst is NaT but monthfirst has value -> take monthfirst
     out = out.where(~(dt_dayfirst.isna() & dt_monthfirst.notna()), dt_monthfirst)
 
     return out
@@ -543,10 +535,8 @@ def kpi_validacion_pbi_all(ventasnc_all: pd.DataFrame) -> int:
         return 0
 
     est_ok = ventasnc_all["Estatus"].astype(str).str.strip().eq("Entregado")
-
     venta = ventasnc_all["Venta"]
     blank_or_trim_empty = venta.isna() | venta.astype(str).str.strip().eq("")
-
     total = int((est_ok & blank_or_trim_empty).sum())
     return total
 
@@ -591,7 +581,6 @@ def main():
     consulta_base = st.session_state["base_data"]["consulta_base"]
     validacion_pbi = st.session_state["base_data"]["validacion_pbi"]
 
-    # ✅ The rest of the dashboard still uses creation-date filtering (as your code already does)
     consulta = consulta_base[
         (consulta_base["Fecha"] >= fecha_ini) & (consulta_base["Fecha"] <= fecha_fin)
     ].copy()
@@ -715,13 +704,11 @@ def main():
     with tabs[1]:
         st.subheader("Back Office")
 
-        # ✅ Back Office MUST be counted by Rastreo timestamp and must IGNORE "Fecha creacion"
         if "Back Office" not in consulta_base.columns:
             st.info("No existe la columna 'Back Office' en los datos.")
         else:
             df_bo_ctx = consulta_base.copy()
 
-            # Apply same slicers except Mes (Mes is creation-date based)
             if centro_sel != "All":
                 df_bo_ctx = df_bo_ctx[df_bo_ctx["Centro Original"] == centro_sel]
             if supervisor_sel != "All":
@@ -736,8 +723,10 @@ def main():
             df_back["BO_Fecha"] = df_back["BO_DT"].dt.date
             df_back["BO_Hora"] = df_back["BO_DT"].dt.hour
 
-            # ✅ STRICT: show ONLY records whose BO date is inside the selected date filter
             df_back = df_back[(df_back["BO_Fecha"] >= fecha_ini) & (df_back["BO_Fecha"] <= fecha_fin)].copy()
+
+            if mes_sel != "All" and not df_back.empty:
+                df_back = df_back[df_back["BO_DT"].dt.strftime("%B") == mes_sel].copy()
 
             if df_back.empty:
                 st.info("No hay registros Back Office (por fecha/hora de Rastreo) dentro del rango seleccionado.")
@@ -750,7 +739,173 @@ def main():
                     title="Total por día (Back Office) — por fecha/hora de Back Office (Rastreo)",
                     labels={"size": "Total Back Office", "BO_Fecha": "Fecha Back Office"},
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
+
+                df_back["BO_MonthKey"] = df_back["BO_DT"].dt.strftime("%Y-%m")
+                df_back["BO_MonthName"] = df_back["BO_DT"].dt.strftime("%B")
+                df_back["BO_MonthLabel"] = df_back["BO_MonthKey"] + " (" + df_back["BO_MonthName"] + ")"
+
+                month_start = df_back["BO_DT"].dt.to_period("M").dt.to_timestamp()
+                first_wd = month_start.dt.weekday
+                df_back["BO_WeekOfMonth"] = ((df_back["BO_DT"].dt.day + first_wd - 1) // 7) + 1
+
+                st.markdown("### Vista por meses y semanas (Back Office)")
+
+                month_options = sorted(df_back["BO_MonthLabel"].dropna().unique().tolist())
+                default_months = month_options if month_options else []
+                months_sel = st.multiselect(
+                    "Selecciona uno o más meses (Back Office)",
+                    options=month_options,
+                    default=default_months,
+                    key="bo_months_multi",
+                )
+
+                df_mw = df_back.copy()
+                if months_sel:
+                    df_mw = df_mw[df_mw["BO_MonthLabel"].isin(months_sel)].copy()
+                else:
+                    df_mw = df_mw.iloc[0:0].copy()
+
+                if df_mw.empty:
+                    st.info("No hay datos Back Office para los meses seleccionados.")
+                else:
+                    df_mw["BO_WeekLabel"] = df_mw["BO_MonthLabel"] + " - Semana " + df_mw["BO_WeekOfMonth"].astype(int).astype(str)
+                    week_options = sorted(df_mw["BO_WeekLabel"].dropna().unique().tolist())
+                    default_weeks = week_options if week_options else []
+
+                    weeks_sel = st.multiselect(
+                        "Selecciona Semana(s) del mes (Back Office)",
+                        options=week_options,
+                        default=default_weeks,
+                        key="bo_weeks_multi",
+                    )
+
+                    if weeks_sel:
+                        df_mw = df_mw[df_mw["BO_WeekLabel"].isin(weeks_sel)].copy()
+                    else:
+                        df_mw = df_mw.iloc[0:0].copy()
+
+                    if df_mw.empty:
+                        st.info("No hay datos Back Office para las semanas seleccionadas.")
+                    else:
+                        by_day_mw = df_mw.groupby("BO_Fecha", as_index=False).size()
+                        fig_mw = px.bar(
+                            by_day_mw,
+                            x="BO_Fecha",
+                            y="size",
+                            title="Total por día (Back Office) — filtro por Mes(es) y Semana(s)",
+                            labels={"size": "Total Back Office", "BO_Fecha": "Fecha Back Office"},
+                        )
+                        st.plotly_chart(fig_mw, width="stretch")
+
+                        st.markdown("### Comparativo día vs día (mes contra mes)")
+
+                        df_cmp = df_mw.copy()
+                        df_cmp["BO_DiaDelMes"] = df_cmp["BO_DT"].dt.day
+
+                        cmp = (
+                            df_cmp.groupby(["BO_MonthLabel", "BO_DiaDelMes"], as_index=False)
+                            .size()
+                            .rename(columns={"size": "Total"})
+                        )
+
+                        fig_cmp = px.line(
+                            cmp,
+                            x="BO_DiaDelMes",
+                            y="Total",
+                            color="BO_MonthLabel",
+                            markers=True,
+                            title="Comparativo por día del mes (Back Office)",
+                            labels={
+                                "BO_DiaDelMes": "Día del mes",
+                                "Total": "Total Back Office",
+                                "BO_MonthLabel": "Mes",
+                            },
+                        )
+                        fig_cmp.update_xaxes(dtick=1)
+                        st.plotly_chart(fig_cmp, width="stretch")
+
+                        st.markdown("#### Comparar dos fechas específicas (calendario)")
+
+                        avail_dates = sorted(df_mw["BO_Fecha"].dropna().unique().tolist())
+                        if not avail_dates:
+                            st.info("No hay fechas disponibles para comparar con los filtros actuales.")
+                        else:
+                            d_min = avail_dates[0]
+                            d_max = avail_dates[-1]
+                            d_def_2 = d_max
+                            d_def_1 = avail_dates[-2] if len(avail_dates) >= 2 else d_max
+
+                            cA, cB = st.columns(2)
+                            with cA:
+                                d1 = st.date_input(
+                                    "Fecha 1 (día a comparar)",
+                                    value=d_def_1,
+                                    min_value=d_min,
+                                    max_value=d_max,
+                                    key="bo_cmp_calendar_date1",
+                                )
+                            with cB:
+                                d2 = st.date_input(
+                                    "Fecha 2 (día a comparar)",
+                                    value=d_def_2,
+                                    min_value=d_min,
+                                    max_value=d_max,
+                                    key="bo_cmp_calendar_date2",
+                                )
+
+                            df_d1 = df_mw[df_mw["BO_Fecha"] == d1].copy()
+                            df_d2 = df_mw[df_mw["BO_Fecha"] == d2].copy()
+
+                            t1 = int(df_d1.shape[0])
+                            t2 = int(df_d2.shape[0])
+
+                            m1, m2, m3 = st.columns(3)
+                            with m1:
+                                st.metric("Total Back Office (Fecha 1)", t1)
+                            with m2:
+                                st.metric("Total Back Office (Fecha 2)", t2)
+                            with m3:
+                                st.metric("Diferencia (Fecha 1 - Fecha 2)", t1 - t2)
+
+                            comp_df = pd.DataFrame(
+                                {
+                                    "Fecha": [str(d1), str(d2)],
+                                    "Total": [t1, t2],
+                                }
+                            )
+                            fig_dates = px.bar(
+                                comp_df,
+                                x="Fecha",
+                                y="Total",
+                                title="Comparativo Back Office — Fecha vs Fecha",
+                                labels={"Total": "Total Back Office"},
+                            )
+                            st.plotly_chart(fig_dates, width="stretch")
+
+                            h1 = df_d1.groupby("BO_Hora").size()
+                            h2 = df_d2.groupby("BO_Hora").size()
+
+                            hours = list(range(0, 24))
+                            hour_df = pd.DataFrame(
+                                {
+                                    "Hora": hours,
+                                    str(d1): [int(h1.get(h, 0)) for h in hours],
+                                    str(d2): [int(h2.get(h, 0)) for h in hours],
+                                }
+                            )
+                            hour_long = hour_df.melt(id_vars="Hora", var_name="Fecha", value_name="Total")
+
+                            fig_hour = px.bar(
+                                hour_long,
+                                x="Hora",
+                                y="Total",
+                                color="Fecha",
+                                barmode="group",
+                                title="Comparativo por hora — Fecha vs Fecha (Back Office)",
+                                labels={"Total": "Total Back Office", "Hora": "Hora Back Office"},
+                            )
+                            st.plotly_chart(fig_hour, width="stretch")
 
                 day_options = sorted(by_day["BO_Fecha"].unique())
                 today = date.today()
@@ -773,7 +928,7 @@ def main():
                     title=f"Total Back Office por hora – {day_sel} (hora Back Office)",
                     labels={"size": "Total Back Office", "BO_Hora": "Hora Back Office"},
                 )
-                st.plotly_chart(fig_total, use_container_width=True)
+                st.plotly_chart(fig_total, width="stretch")
 
                 by_hour_team = (
                     df_day.groupby(["BO_Hora", "Jefe directo"], as_index=False)
@@ -794,7 +949,7 @@ def main():
                         "Jefe directo": "Supervisor",
                     },
                 )
-                st.plotly_chart(fig_team, use_container_width=True)
+                st.plotly_chart(fig_team, width="stretch")
 
                 st.subheader("Detalle Back Office (Ejecutivo / Jefe directo)")
                 detalle_cols_bo = [
@@ -827,7 +982,7 @@ def main():
                     [col for col in ["Jefe directo", "Ejecutivo", "Fecha Back Office", "Hora Back Office", "Folio"] if col in df_det_bo.columns]
                 )
 
-                st.dataframe(df_det_bo)
+                st.dataframe(df_det_bo, width="stretch")
 
                 st.download_button(
                     "Descargar Detalle Back Office (Excel)",
@@ -852,7 +1007,177 @@ def main():
                 title="Canceladas por día",
                 labels={"size": "Total Canc Error"},
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
+
+            # =========================
+            # ✅ Vista por meses y semanas (Canc Error) + Comparativo día vs día + Fecha 1 vs Fecha 2
+            # =========================
+            df_canc_ctx = df_canc.copy()
+            df_canc_ctx["C_DT"] = pd.to_datetime(df_canc_ctx["Fecha creacion"], errors="coerce")
+            df_canc_ctx["C_Fecha"] = df_canc_ctx["C_DT"].dt.date
+            df_canc_ctx["C_Hora"] = df_canc_ctx["C_DT"].dt.hour
+
+            df_canc_ctx = df_canc_ctx[df_canc_ctx["C_DT"].notna()].copy()
+
+            if not df_canc_ctx.empty:
+                df_canc_ctx["C_MonthKey"] = df_canc_ctx["C_DT"].dt.strftime("%Y-%m")
+                df_canc_ctx["C_MonthName"] = df_canc_ctx["C_DT"].dt.strftime("%B")
+                df_canc_ctx["C_MonthLabel"] = df_canc_ctx["C_MonthKey"] + " (" + df_canc_ctx["C_MonthName"] + ")"
+
+                month_start = df_canc_ctx["C_DT"].dt.to_period("M").dt.to_timestamp()
+                first_wd = month_start.dt.weekday
+                df_canc_ctx["C_WeekOfMonth"] = ((df_canc_ctx["C_DT"].dt.day + first_wd - 1) // 7) + 1
+
+                st.markdown("### Vista por meses y semanas (Canc Error)")
+
+                c_month_options = sorted(df_canc_ctx["C_MonthLabel"].dropna().unique().tolist())
+                c_default_months = c_month_options if c_month_options else []
+
+                c_months_sel = st.multiselect(
+                    "Selecciona uno o más meses (Canc Error)",
+                    options=c_month_options,
+                    default=c_default_months,
+                    key="canc_months_multi",
+                )
+
+                df_cmw = df_canc_ctx.copy()
+                if c_months_sel:
+                    df_cmw = df_cmw[df_cmw["C_MonthLabel"].isin(c_months_sel)].copy()
+                else:
+                    df_cmw = df_cmw.iloc[0:0].copy()
+
+                if df_cmw.empty:
+                    st.info("No hay datos Canc Error para los meses seleccionados.")
+                else:
+                    df_cmw["C_WeekLabel"] = df_cmw["C_MonthLabel"] + " - Semana " + df_cmw["C_WeekOfMonth"].astype(int).astype(str)
+                    c_week_options = sorted(df_cmw["C_WeekLabel"].dropna().unique().tolist())
+                    c_default_weeks = c_week_options if c_week_options else []
+
+                    c_weeks_sel = st.multiselect(
+                        "Selecciona Semana(s) del mes (Canc Error)",
+                        options=c_week_options,
+                        default=c_default_weeks,
+                        key="canc_weeks_multi",
+                    )
+
+                    if c_weeks_sel:
+                        df_cmw = df_cmw[df_cmw["C_WeekLabel"].isin(c_weeks_sel)].copy()
+                    else:
+                        df_cmw = df_cmw.iloc[0:0].copy()
+
+                    if df_cmw.empty:
+                        st.info("No hay datos Canc Error para las semanas seleccionadas.")
+                    else:
+                        by_day_cmw = df_cmw.groupby("C_Fecha", as_index=False).size()
+                        fig_cmw = px.bar(
+                            by_day_cmw,
+                            x="C_Fecha",
+                            y="size",
+                            title="Total por día (Canc Error) — filtro por Mes(es) y Semana(s)",
+                            labels={"size": "Total Canc Error", "C_Fecha": "Fecha"},
+                        )
+                        st.plotly_chart(fig_cmw, width="stretch")
+
+                        st.markdown("### Comparativo día vs día (mes contra mes) — Canc Error")
+
+                        df_cmw["C_DiaDelMes"] = df_cmw["C_DT"].dt.day
+                        cmp_c = (
+                            df_cmw.groupby(["C_MonthLabel", "C_DiaDelMes"], as_index=False)
+                            .size()
+                            .rename(columns={"size": "Total"})
+                        )
+
+                        fig_cmp_c = px.line(
+                            cmp_c,
+                            x="C_DiaDelMes",
+                            y="Total",
+                            color="C_MonthLabel",
+                            markers=True,
+                            title="Comparativo por día del mes (Canc Error)",
+                            labels={
+                                "C_DiaDelMes": "Día del mes",
+                                "Total": "Total Canc Error",
+                                "C_MonthLabel": "Mes",
+                            },
+                        )
+                        fig_cmp_c.update_xaxes(dtick=1)
+                        st.plotly_chart(fig_cmp_c, width="stretch")
+
+                        st.markdown("#### Comparar dos fechas específicas (calendario) — Canc Error")
+
+                        c_avail_dates = sorted(df_cmw["C_Fecha"].dropna().unique().tolist())
+                        if not c_avail_dates:
+                            st.info("No hay fechas disponibles para comparar con los filtros actuales (Canc Error).")
+                        else:
+                            c_d_min = c_avail_dates[0]
+                            c_d_max = c_avail_dates[-1]
+                            c_d_def_2 = c_d_max
+                            c_d_def_1 = c_avail_dates[-2] if len(c_avail_dates) >= 2 else c_d_max
+
+                            cA, cB = st.columns(2)
+                            with cA:
+                                c_d1 = st.date_input(
+                                    "Fecha 1 (día a comparar) — Canc Error",
+                                    value=c_d_def_1,
+                                    min_value=c_d_min,
+                                    max_value=c_d_max,
+                                    key="canc_cmp_calendar_date1",
+                                )
+                            with cB:
+                                c_d2 = st.date_input(
+                                    "Fecha 2 (día a comparar) — Canc Error",
+                                    value=c_d_def_2,
+                                    min_value=c_d_min,
+                                    max_value=c_d_max,
+                                    key="canc_cmp_calendar_date2",
+                                )
+
+                            df_cd1 = df_cmw[df_cmw["C_Fecha"] == c_d1].copy()
+                            df_cd2 = df_cmw[df_cmw["C_Fecha"] == c_d2].copy()
+
+                            ct1 = int(df_cd1.shape[0])
+                            ct2 = int(df_cd2.shape[0])
+
+                            cm1, cm2, cm3 = st.columns(3)
+                            with cm1:
+                                st.metric("Total Canc Error (Fecha 1)", ct1)
+                            with cm2:
+                                st.metric("Total Canc Error (Fecha 2)", ct2)
+                            with cm3:
+                                st.metric("Diferencia (Fecha 1 - Fecha 2)", ct1 - ct2)
+
+                            c_comp_df = pd.DataFrame({"Fecha": [str(c_d1), str(c_d2)], "Total": [ct1, ct2]})
+                            fig_c_dates = px.bar(
+                                c_comp_df,
+                                x="Fecha",
+                                y="Total",
+                                title="Comparativo Canc Error — Fecha vs Fecha",
+                                labels={"Total": "Total Canc Error"},
+                            )
+                            st.plotly_chart(fig_c_dates, width="stretch")
+
+                            ch1 = df_cd1.groupby("C_Hora").size()
+                            ch2 = df_cd2.groupby("C_Hora").size()
+                            hours = list(range(0, 24))
+                            c_hour_df = pd.DataFrame(
+                                {
+                                    "Hora": hours,
+                                    str(c_d1): [int(ch1.get(h, 0)) for h in hours],
+                                    str(c_d2): [int(ch2.get(h, 0)) for h in hours],
+                                }
+                            )
+                            c_hour_long = c_hour_df.melt(id_vars="Hora", var_name="Fecha", value_name="Total")
+
+                            fig_c_hour = px.bar(
+                                c_hour_long,
+                                x="Hora",
+                                y="Total",
+                                color="Fecha",
+                                barmode="group",
+                                title="Comparativo por hora — Fecha vs Fecha (Canc Error)",
+                                labels={"Total": "Total Canc Error", "Hora": "Hora"},
+                            )
+                            st.plotly_chart(fig_c_hour, width="stretch")
 
             day_options = sorted(by_day["Fecha"].unique())
             today = date.today()
@@ -873,7 +1198,7 @@ def main():
                 title=f"Desglose por hora – {day_sel}",
                 labels={"size": "Total Canc Error"},
             )
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, width="stretch")
 
             by_hour_team = (
                 df_day.groupby(["Hora", "Jefe directo"], as_index=False)
@@ -894,7 +1219,7 @@ def main():
                     "Jefe directo": "Supervisor",
                 },
             )
-            st.plotly_chart(fig_team_canc, use_container_width=True)
+            st.plotly_chart(fig_team_canc, width="stretch")
 
             st.subheader("Detalle de cancelaciones (Ejecutivo / Jefe directo)")
             detalle_cols = [
@@ -924,7 +1249,7 @@ def main():
                 [col for col in ["Jefe directo", "Ejecutivo", "Hora", "Folio"] if col in df_det.columns]
             )
 
-            st.dataframe(df_det)
+            st.dataframe(df_det, width="stretch")
 
             st.download_button(
                 "Descargar Detalle Canceladas (Excel)",
@@ -968,7 +1293,7 @@ def main():
                 labels={"size": "Total Programadas"},
             )
             fig.update_xaxes(type="category")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
             st.download_button(
                 "Descargar Programadas (Excel)",
@@ -1011,10 +1336,10 @@ def main():
                 margin=dict(l=260, r=40, t=60, b=40),
                 yaxis=dict(automargin=True),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
             st.subheader("Ranking completo (todos los ejecutivos)")
-            st.dataframe(by_exec_all, use_container_width=True)
+            st.dataframe(by_exec_all, width="stretch")
 
             st.download_button(
                 "Descargar Top Ejecutivos (Excel)",
@@ -1086,7 +1411,17 @@ def main():
 
             grouped_with_total = pd.concat([grouped, pd.DataFrame([total_row])], ignore_index=True)
 
-            st.dataframe(grouped_with_total)
+            if "EnTransito" in grouped_with_total.columns:
+                styled_grouped = grouped_with_total.style.set_properties(
+                    subset=["EnTransito"],
+                    **{
+                        "background-color": "rgba(34,197,94,0.22)",
+                        "font-weight": "800",
+                    },
+                )
+                st.dataframe(styled_grouped, width="stretch")
+            else:
+                st.dataframe(grouped_with_total, width="stretch")
 
             by_sup = (
                 grouped.groupby("Jefe directo", as_index=False)["TotalProgramadas"]
@@ -1101,7 +1436,7 @@ def main():
             )
             fig.update_traces(textposition="inside", textinfo="label+percent")
             fig.update_layout(showlegend=True)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
             st.download_button(
                 "Descargar detalle general (Excel)",
@@ -1138,7 +1473,7 @@ def main():
                 df_en_t = df_en_t.sort_values(
                     [col for col in ["Jefe directo", "Ejecutivo", "Fecha", "Hora", "Folio"] if col in df_en_t.columns]
                 )
-                st.dataframe(df_en_t)
+                st.dataframe(df_en_t, width="stretch")
 
                 st.download_button(
                     "Descargar detalle En Tránsito (Excel)",
@@ -1158,7 +1493,7 @@ def main():
             st.info("No hay ejecutivos sin venta para los filtros actuales.")
         else:
             df_sinv = sinv_fil.sort_values(["JefeDirecto", "NombreCompleto"])
-            st.dataframe(df_sinv[["JefeDirecto", "NombreCompleto"]])
+            st.dataframe(df_sinv[["JefeDirecto", "NombreCompleto"]], width="stretch")
 
             st.download_button(
                 "Descargar Sin Venta (Excel)",

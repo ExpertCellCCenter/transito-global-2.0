@@ -388,7 +388,7 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
     if "Vendedor" in df.columns:
         df = df[df["Vendedor"].str.upper() != EXCLUDED_VENDOR].copy()
 
-    df["Centro Original"] = np.nan
+    df["Centro Original"] =  pd.Series(pd.NA, index=df.index, dtype="object")
     mask_cc2 = df["Centro"].str.contains("EXP ATT C CENTER 2", na=False)
     mask_juarez = df["Centro"].str.contains("EXP ATT C CENTER JUAREZ", na=False)
     df.loc[mask_cc2, "Centro Original"] = "CC2"

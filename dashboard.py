@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import date, datetime
+from datetime import date, datetime, time
 import pyodbc
 import plotly.express as px
 from io import BytesIO
@@ -274,6 +274,9 @@ def parse_backoffice_datetime(series: pd.Series, window_start: date | None = Non
     out = out.where(~(dt_dayfirst.isna() & dt_monthfirst.notna()), dt_monthfirst)
 
     return out
+
+def _trim_time_to_minute(t: time) -> time:
+    return t.replace(second=0, microsecond=0)
 
 # -------------------------------------------------
 # DB CONNECTION
@@ -825,40 +828,126 @@ def main():
                         fig_cmp.update_xaxes(dtick=1)
                         st.plotly_chart(fig_cmp, width="stretch")
 
-                        st.markdown("#### Comparar dos fechas específicas (calendario)")
+                        # =========================
+                        # ✅ UPDATED UI: Calendario (date_input + time_input) para intervalos
+                        # =========================
+                        st.markdown("#### Comparar dos intervalos de tiempo (calendario)")
 
+                        avail_dts = df_mw["BO_DT"].dropna()
                         avail_dates = sorted(df_mw["BO_Fecha"].dropna().unique().tolist())
-                        if not avail_dates:
-                            st.info("No hay fechas disponibles para comparar con los filtros actuales.")
+
+                        if avail_dts.empty or not avail_dates:
+                            st.info("No hay fechas/horas disponibles para comparar con los filtros actuales.")
                         else:
-                            d_min = avail_dates[0]
-                            d_max = avail_dates[-1]
-                            d_def_2 = d_max
-                            d_def_1 = avail_dates[-2] if len(avail_dates) >= 2 else d_max
+                            min_dt = avail_dts.min().to_pydatetime()
+                            max_dt = avail_dts.max().to_pydatetime()
+
+                            d_def_2 = avail_dates[-1]
+                            d_def_1 = avail_dates[-2] if len(avail_dates) >= 2 else avail_dates[-1]
+
+                            s1_def = max(datetime.combine(d_def_1, time(0, 0, 0)), min_dt)
+                            e1_def = min(datetime.combine(d_def_1, time(23, 59, 59)), max_dt)
+                            s2_def = max(datetime.combine(d_def_2, time(0, 0, 0)), min_dt)
+                            e2_def = min(datetime.combine(d_def_2, time(23, 59, 59)), max_dt)
+
+                            if s1_def > e1_def:
+                                s1_def, e1_def = min_dt, max_dt
+                            if s2_def > e2_def:
+                                s2_def, e2_def = min_dt, max_dt
 
                             cA, cB = st.columns(2)
+
+                            # ---- Fecha 1 ----
                             with cA:
-                                d1 = st.date_input(
-                                    "Fecha 1 (día a comparar)",
-                                    value=d_def_1,
-                                    min_value=d_min,
-                                    max_value=d_max,
-                                    key="bo_cmp_calendar_date1",
-                                )
+                                st.markdown("**Fecha 1 (intervalo a comparar)**")
+                                a1, a2 = st.columns(2)
+                                with a1:
+                                    s1_date = st.date_input(
+                                        "Inicio (Fecha 1)",
+                                        value=s1_def.date(),
+                                        min_value=min_dt.date(),
+                                        max_value=max_dt.date(),
+                                        key="bo_i1_start_date",
+                                    )
+                                with a2:
+                                    s1_time = st.time_input(
+                                        "Inicio (Hora 1)",
+                                        value=_trim_time_to_minute(s1_def.time()),
+                                        key="bo_i1_start_time",
+                                    )
+                                b1, b2 = st.columns(2)
+                                with b1:
+                                    e1_date = st.date_input(
+                                        "Fin (Fecha 1)",
+                                        value=e1_def.date(),
+                                        min_value=min_dt.date(),
+                                        max_value=max_dt.date(),
+                                        key="bo_i1_end_date",
+                                    )
+                                with b2:
+                                    e1_time = st.time_input(
+                                        "Fin (Hora 1)",
+                                        value=_trim_time_to_minute(e1_def.time()),
+                                        key="bo_i1_end_time",
+                                    )
+
+                            # ---- Fecha 2 ----
                             with cB:
-                                d2 = st.date_input(
-                                    "Fecha 2 (día a comparar)",
-                                    value=d_def_2,
-                                    min_value=d_min,
-                                    max_value=d_max,
-                                    key="bo_cmp_calendar_date2",
-                                )
+                                st.markdown("**Fecha 2 (intervalo a comparar)**")
+                                a1, a2 = st.columns(2)
+                                with a1:
+                                    s2_date = st.date_input(
+                                        "Inicio (Fecha 2)",
+                                        value=s2_def.date(),
+                                        min_value=min_dt.date(),
+                                        max_value=max_dt.date(),
+                                        key="bo_i2_start_date",
+                                    )
+                                with a2:
+                                    s2_time = st.time_input(
+                                        "Inicio (Hora 2)",
+                                        value=_trim_time_to_minute(s2_def.time()),
+                                        key="bo_i2_start_time",
+                                    )
+                                b1, b2 = st.columns(2)
+                                with b1:
+                                    e2_date = st.date_input(
+                                        "Fin (Fecha 2)",
+                                        value=e2_def.date(),
+                                        min_value=min_dt.date(),
+                                        max_value=max_dt.date(),
+                                        key="bo_i2_end_date",
+                                    )
+                                with b2:
+                                    e2_time = st.time_input(
+                                        "Fin (Hora 2)",
+                                        value=_trim_time_to_minute(e2_def.time()),
+                                        key="bo_i2_end_time",
+                                    )
 
-                            df_d1 = df_mw[df_mw["BO_Fecha"] == d1].copy()
-                            df_d2 = df_mw[df_mw["BO_Fecha"] == d2].copy()
+                            s1 = datetime.combine(s1_date, s1_time)
+                            e1 = datetime.combine(e1_date, e1_time)
+                            s2 = datetime.combine(s2_date, s2_time)
+                            e2 = datetime.combine(e2_date, e2_time)
 
-                            t1 = int(df_d1.shape[0])
-                            t2 = int(df_d2.shape[0])
+                            # clip to available data window
+                            if s1 < min_dt: s1 = min_dt
+                            if e1 > max_dt: e1 = max_dt
+                            if s2 < min_dt: s2 = min_dt
+                            if e2 > max_dt: e2 = max_dt
+
+                            if s1 > e1:
+                                st.warning("En Fecha 1, el inicio es mayor que el fin. Se ajustó automáticamente.")
+                                s1, e1 = e1, s1
+                            if s2 > e2:
+                                st.warning("En Fecha 2, el inicio es mayor que el fin. Se ajustó automáticamente.")
+                                s2, e2 = e2, s2
+
+                            df_i1 = df_mw[(df_mw["BO_DT"] >= pd.Timestamp(s1)) & (df_mw["BO_DT"] <= pd.Timestamp(e1))].copy()
+                            df_i2 = df_mw[(df_mw["BO_DT"] >= pd.Timestamp(s2)) & (df_mw["BO_DT"] <= pd.Timestamp(e2))].copy()
+
+                            t1 = int(df_i1.shape[0])
+                            t2 = int(df_i2.shape[0])
 
                             m1, m2, m3 = st.columns(3)
                             with m1:
@@ -870,28 +959,31 @@ def main():
 
                             comp_df = pd.DataFrame(
                                 {
-                                    "Fecha": [str(d1), str(d2)],
+                                    "Comparación": ["Fecha 1", "Fecha 2"],
                                     "Total": [t1, t2],
+                                    "Inicio": [s1, s2],
+                                    "Fin": [e1, e2],
                                 }
                             )
                             fig_dates = px.bar(
                                 comp_df,
-                                x="Fecha",
+                                x="Comparación",
                                 y="Total",
-                                title="Comparativo Back Office — Fecha vs Fecha",
+                                title="Comparativo Back Office — Fecha 1 vs Fecha 2 (por intervalo)",
                                 labels={"Total": "Total Back Office"},
+                                hover_data={"Inicio": True, "Fin": True, "Comparación": False},
                             )
                             st.plotly_chart(fig_dates, width="stretch")
 
-                            h1 = df_d1.groupby("BO_Hora").size()
-                            h2 = df_d2.groupby("BO_Hora").size()
+                            h1 = df_i1.groupby("BO_Hora").size()
+                            h2 = df_i2.groupby("BO_Hora").size()
 
                             hours = list(range(0, 24))
                             hour_df = pd.DataFrame(
                                 {
                                     "Hora": hours,
-                                    str(d1): [int(h1.get(h, 0)) for h in hours],
-                                    str(d2): [int(h2.get(h, 0)) for h in hours],
+                                    "Fecha 1": [int(h1.get(h, 0)) for h in hours],
+                                    "Fecha 2": [int(h2.get(h, 0)) for h in hours],
                                 }
                             )
                             hour_long = hour_df.melt(id_vars="Hora", var_name="Fecha", value_name="Total")
@@ -902,11 +994,12 @@ def main():
                                 y="Total",
                                 color="Fecha",
                                 barmode="group",
-                                title="Comparativo por hora — Fecha vs Fecha (Back Office)",
+                                title="Comparativo por hora — Fecha 1 vs Fecha 2 (Back Office, por intervalo)",
                                 labels={"Total": "Total Back Office", "Hora": "Hora Back Office"},
                             )
                             st.plotly_chart(fig_hour, width="stretch")
 
+                # --- Existing daily select (kept as-is) ---
                 day_options = sorted(by_day["BO_Fecha"].unique())
                 today = date.today()
                 default_index = day_options.index(today) if today in day_options else len(day_options) - 1
@@ -1010,13 +1103,12 @@ def main():
             st.plotly_chart(fig, width="stretch")
 
             # =========================
-            # ✅ Vista por meses y semanas (Canc Error) + Comparativo día vs día + Fecha 1 vs Fecha 2
+            # ✅ Vista por meses y semanas (Canc Error) + Comparativo día vs día + Fecha 1 vs Fecha 2 (POR INTERVALO)
             # =========================
             df_canc_ctx = df_canc.copy()
             df_canc_ctx["C_DT"] = pd.to_datetime(df_canc_ctx["Fecha creacion"], errors="coerce")
             df_canc_ctx["C_Fecha"] = df_canc_ctx["C_DT"].dt.date
             df_canc_ctx["C_Hora"] = df_canc_ctx["C_DT"].dt.hour
-
             df_canc_ctx = df_canc_ctx[df_canc_ctx["C_DT"].notna()].copy()
 
             if not df_canc_ctx.empty:
@@ -1103,37 +1195,120 @@ def main():
                         fig_cmp_c.update_xaxes(dtick=1)
                         st.plotly_chart(fig_cmp_c, width="stretch")
 
-                        st.markdown("#### Comparar dos fechas específicas (calendario) — Canc Error")
+                        # =========================
+                        # ✅ UPDATED UI: Calendario (date_input + time_input) para intervalos (Canc Error)
+                        # =========================
+                        st.markdown("#### Comparar dos intervalos de tiempo (calendario) — Canc Error")
 
+                        c_avail_dts = df_cmw["C_DT"].dropna()
                         c_avail_dates = sorted(df_cmw["C_Fecha"].dropna().unique().tolist())
-                        if not c_avail_dates:
-                            st.info("No hay fechas disponibles para comparar con los filtros actuales (Canc Error).")
+
+                        if c_avail_dts.empty or not c_avail_dates:
+                            st.info("No hay fechas/horas disponibles para comparar con los filtros actuales (Canc Error).")
                         else:
-                            c_d_min = c_avail_dates[0]
-                            c_d_max = c_avail_dates[-1]
-                            c_d_def_2 = c_d_max
-                            c_d_def_1 = c_avail_dates[-2] if len(c_avail_dates) >= 2 else c_d_max
+                            c_min_dt = c_avail_dts.min().to_pydatetime()
+                            c_max_dt = c_avail_dts.max().to_pydatetime()
+
+                            c_d_def_2 = c_avail_dates[-1]
+                            c_d_def_1 = c_avail_dates[-2] if len(c_avail_dates) >= 2 else c_avail_dates[-1]
+
+                            c_s1_def = max(datetime.combine(c_d_def_1, time(0, 0, 0)), c_min_dt)
+                            c_e1_def = min(datetime.combine(c_d_def_1, time(23, 59, 59)), c_max_dt)
+                            c_s2_def = max(datetime.combine(c_d_def_2, time(0, 0, 0)), c_min_dt)
+                            c_e2_def = min(datetime.combine(c_d_def_2, time(23, 59, 59)), c_max_dt)
+
+                            if c_s1_def > c_e1_def:
+                                c_s1_def, c_e1_def = c_min_dt, c_max_dt
+                            if c_s2_def > c_e2_def:
+                                c_s2_def, c_e2_def = c_min_dt, c_max_dt
 
                             cA, cB = st.columns(2)
-                            with cA:
-                                c_d1 = st.date_input(
-                                    "Fecha 1 (día a comparar) — Canc Error",
-                                    value=c_d_def_1,
-                                    min_value=c_d_min,
-                                    max_value=c_d_max,
-                                    key="canc_cmp_calendar_date1",
-                                )
-                            with cB:
-                                c_d2 = st.date_input(
-                                    "Fecha 2 (día a comparar) — Canc Error",
-                                    value=c_d_def_2,
-                                    min_value=c_d_min,
-                                    max_value=c_d_max,
-                                    key="canc_cmp_calendar_date2",
-                                )
 
-                            df_cd1 = df_cmw[df_cmw["C_Fecha"] == c_d1].copy()
-                            df_cd2 = df_cmw[df_cmw["C_Fecha"] == c_d2].copy()
+                            with cA:
+                                st.markdown("**Fecha 1 (intervalo a comparar)**")
+                                a1, a2 = st.columns(2)
+                                with a1:
+                                    c_s1_date = st.date_input(
+                                        "Inicio (Fecha 1) — Canc Error",
+                                        value=c_s1_def.date(),
+                                        min_value=c_min_dt.date(),
+                                        max_value=c_max_dt.date(),
+                                        key="canc_i1_start_date",
+                                    )
+                                with a2:
+                                    c_s1_time = st.time_input(
+                                        "Inicio (Hora 1) — Canc Error",
+                                        value=_trim_time_to_minute(c_s1_def.time()),
+                                        key="canc_i1_start_time",
+                                    )
+                                b1, b2 = st.columns(2)
+                                with b1:
+                                    c_e1_date = st.date_input(
+                                        "Fin (Fecha 1) — Canc Error",
+                                        value=c_e1_def.date(),
+                                        min_value=c_min_dt.date(),
+                                        max_value=c_max_dt.date(),
+                                        key="canc_i1_end_date",
+                                    )
+                                with b2:
+                                    c_e1_time = st.time_input(
+                                        "Fin (Hora 1) — Canc Error",
+                                        value=_trim_time_to_minute(c_e1_def.time()),
+                                        key="canc_i1_end_time",
+                                    )
+
+                            with cB:
+                                st.markdown("**Fecha 2 (intervalo a comparar)**")
+                                a1, a2 = st.columns(2)
+                                with a1:
+                                    c_s2_date = st.date_input(
+                                        "Inicio (Fecha 2) — Canc Error",
+                                        value=c_s2_def.date(),
+                                        min_value=c_min_dt.date(),
+                                        max_value=c_max_dt.date(),
+                                        key="canc_i2_start_date",
+                                    )
+                                with a2:
+                                    c_s2_time = st.time_input(
+                                        "Inicio (Hora 2) — Canc Error",
+                                        value=_trim_time_to_minute(c_s2_def.time()),
+                                        key="canc_i2_start_time",
+                                    )
+                                b1, b2 = st.columns(2)
+                                with b1:
+                                    c_e2_date = st.date_input(
+                                        "Fin (Fecha 2) — Canc Error",
+                                        value=c_e2_def.date(),
+                                        min_value=c_min_dt.date(),
+                                        max_value=c_max_dt.date(),
+                                        key="canc_i2_end_date",
+                                    )
+                                with b2:
+                                    c_e2_time = st.time_input(
+                                        "Fin (Hora 2) — Canc Error",
+                                        value=_trim_time_to_minute(c_e2_def.time()),
+                                        key="canc_i2_end_time",
+                                    )
+
+                            c_s1 = datetime.combine(c_s1_date, c_s1_time)
+                            c_e1 = datetime.combine(c_e1_date, c_e1_time)
+                            c_s2 = datetime.combine(c_s2_date, c_s2_time)
+                            c_e2 = datetime.combine(c_e2_date, c_e2_time)
+
+                            if c_s1 < c_min_dt: c_s1 = c_min_dt
+                            if c_e1 > c_max_dt: c_e1 = c_max_dt
+                            if c_s2 < c_min_dt: c_s2 = c_min_dt
+                            if c_e2 > c_max_dt: c_e2 = c_max_dt
+
+                            if c_s1 > c_e1:
+                                st.warning("En Fecha 1 (Canc Error), el inicio es mayor que el fin. Se ajustó automáticamente.")
+                                c_s1, c_e1 = c_e1, c_s1
+                            if c_s2 > c_e2:
+                                st.warning("En Fecha 2 (Canc Error), el inicio es mayor que el fin. Se ajustó automáticamente.")
+                                c_s2, c_e2 = c_e2, c_s2
+
+                            df_cd1 = df_cmw[(df_cmw["C_DT"] >= pd.Timestamp(c_s1)) & (df_cmw["C_DT"] <= pd.Timestamp(c_e1))].copy()
+                            df_cd2 = df_cmw[(df_cmw["C_DT"] >= pd.Timestamp(c_s2)) & (df_cmw["C_DT"] <= pd.Timestamp(c_e2))].copy()
 
                             ct1 = int(df_cd1.shape[0])
                             ct2 = int(df_cd2.shape[0])
@@ -1146,13 +1321,21 @@ def main():
                             with cm3:
                                 st.metric("Diferencia (Fecha 1 - Fecha 2)", ct1 - ct2)
 
-                            c_comp_df = pd.DataFrame({"Fecha": [str(c_d1), str(c_d2)], "Total": [ct1, ct2]})
+                            c_comp_df = pd.DataFrame(
+                                {
+                                    "Comparación": ["Fecha 1", "Fecha 2"],
+                                    "Total": [ct1, ct2],
+                                    "Inicio": [c_s1, c_s2],
+                                    "Fin": [c_e1, c_e2],
+                                }
+                            )
                             fig_c_dates = px.bar(
                                 c_comp_df,
-                                x="Fecha",
+                                x="Comparación",
                                 y="Total",
-                                title="Comparativo Canc Error — Fecha vs Fecha",
+                                title="Comparativo Canc Error — Fecha 1 vs Fecha 2 (por intervalo)",
                                 labels={"Total": "Total Canc Error"},
+                                hover_data={"Inicio": True, "Fin": True, "Comparación": False},
                             )
                             st.plotly_chart(fig_c_dates, width="stretch")
 
@@ -1162,8 +1345,8 @@ def main():
                             c_hour_df = pd.DataFrame(
                                 {
                                     "Hora": hours,
-                                    str(c_d1): [int(ch1.get(h, 0)) for h in hours],
-                                    str(c_d2): [int(ch2.get(h, 0)) for h in hours],
+                                    "Fecha 1": [int(ch1.get(h, 0)) for h in hours],
+                                    "Fecha 2": [int(ch2.get(h, 0)) for h in hours],
                                 }
                             )
                             c_hour_long = c_hour_df.melt(id_vars="Hora", var_name="Fecha", value_name="Total")
@@ -1174,11 +1357,12 @@ def main():
                                 y="Total",
                                 color="Fecha",
                                 barmode="group",
-                                title="Comparativo por hora — Fecha vs Fecha (Canc Error)",
+                                title="Comparativo por hora — Fecha 1 vs Fecha 2 (Canc Error, por intervalo)",
                                 labels={"Total": "Total Canc Error", "Hora": "Hora"},
                             )
                             st.plotly_chart(fig_c_hour, width="stretch")
 
+            # ---- existing day drilldown (kept) ----
             day_options = sorted(by_day["Fecha"].unique())
             today = date.today()
             default_index = day_options.index(today) if today in day_options else len(day_options) - 1

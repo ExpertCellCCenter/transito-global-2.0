@@ -388,7 +388,7 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
     if "Vendedor" in df.columns:
         df = df[df["Vendedor"].str.upper() != EXCLUDED_VENDOR].copy()
 
-    df["Centro Original"] =  pd.Series(pd.NA, index=df.index, dtype="object")
+    df["Centro Original"] = np.nan
     mask_cc2 = df["Centro"].str.contains("EXP ATT C CENTER 2", na=False)
     mask_juarez = df["Centro"].str.contains("EXP ATT C CENTER JUAREZ", na=False)
     df.loc[mask_cc2, "Centro Original"] = "CC2"
@@ -828,6 +828,9 @@ def main():
                         fig_cmp.update_xaxes(dtick=1)
                         st.plotly_chart(fig_cmp, width="stretch")
 
+                        # =========================
+                        # ✅ UPDATED UI: Calendario (date_input + time_input) para intervalos
+                        # =========================
                         st.markdown("#### Comparar dos intervalos de tiempo (calendario)")
 
                         avail_dts = df_mw["BO_DT"].dropna()
@@ -854,6 +857,7 @@ def main():
 
                             cA, cB = st.columns(2)
 
+                            # ---- Fecha 1 ----
                             with cA:
                                 st.markdown("**Fecha 1 (intervalo a comparar)**")
                                 a1, a2 = st.columns(2)
@@ -887,6 +891,7 @@ def main():
                                         key="bo_i1_end_time",
                                     )
 
+                            # ---- Fecha 2 ----
                             with cB:
                                 st.markdown("**Fecha 2 (intervalo a comparar)**")
                                 a1, a2 = st.columns(2)
@@ -925,6 +930,7 @@ def main():
                             s2 = datetime.combine(s2_date, s2_time)
                             e2 = datetime.combine(e2_date, e2_time)
 
+                            # clip to available data window
                             if s1 < min_dt: s1 = min_dt
                             if e1 > max_dt: e1 = max_dt
                             if s2 < min_dt: s2 = min_dt
@@ -993,6 +999,7 @@ def main():
                             )
                             st.plotly_chart(fig_hour, width="stretch")
 
+                # --- Existing daily select (kept as-is) ---
                 day_options = sorted(by_day["BO_Fecha"].unique())
                 today = date.today()
                 default_index = day_options.index(today) if today in day_options else len(day_options) - 1
@@ -1081,25 +1088,7 @@ def main():
     with tabs[2]:
         st.subheader("Canceladas (Canc Error)")
 
-        df_canc = df[df["Estatus"] == "Canc Error"].copy()
-
-        # ✅ FIX ONLY HERE: use "Fecha cancelacion" timestamp to define day/hour for Canc Error
-        cancel_col = None
-        for _cand in ["Fecha cancelacion", "Fecha cancelación", "Fecha Cancelacion", "Fecha Cancelación"]:
-            if _cand in df_canc.columns:
-                cancel_col = _cand
-                break
-
-        if cancel_col is not None:
-            df_canc["CANCEL_DT"] = pd.to_datetime(df_canc[cancel_col], errors="coerce")
-
-            has_cancel = df_canc["CANCEL_DT"].notna()
-            # overwrite Fecha/Hora ONLY for Canc Error tab context
-            df_canc.loc[has_cancel, "Fecha"] = df_canc.loc[has_cancel, "CANCEL_DT"].dt.date
-            df_canc.loc[has_cancel, "Hora"] = df_canc.loc[has_cancel, "CANCEL_DT"].dt.hour
-        else:
-            df_canc["CANCEL_DT"] = pd.NaT
-
+        df_canc = df[df["Estatus"] == "Canc Error"]
         if df_canc.empty:
             st.info("No hay registros cancelados para los filtros actuales.")
         else:
@@ -1117,13 +1106,7 @@ def main():
             # ✅ Vista por meses y semanas (Canc Error) + Comparativo día vs día + Fecha 1 vs Fecha 2 (POR INTERVALO)
             # =========================
             df_canc_ctx = df_canc.copy()
-
-            # ✅ use CANCEL_DT (Fecha cancelacion) as the main datetime for Canc Error analysis
-            if "CANCEL_DT" in df_canc_ctx.columns and df_canc_ctx["CANCEL_DT"].notna().any():
-                df_canc_ctx["C_DT"] = df_canc_ctx["CANCEL_DT"]
-            else:
-                df_canc_ctx["C_DT"] = pd.to_datetime(df_canc_ctx["Fecha creacion"], errors="coerce")
-
+            df_canc_ctx["C_DT"] = pd.to_datetime(df_canc_ctx["Fecha creacion"], errors="coerce")
             df_canc_ctx["C_Fecha"] = df_canc_ctx["C_DT"].dt.date
             df_canc_ctx["C_Hora"] = df_canc_ctx["C_DT"].dt.hour
             df_canc_ctx = df_canc_ctx[df_canc_ctx["C_DT"].notna()].copy()
@@ -1212,6 +1195,9 @@ def main():
                         fig_cmp_c.update_xaxes(dtick=1)
                         st.plotly_chart(fig_cmp_c, width="stretch")
 
+                        # =========================
+                        # ✅ UPDATED UI: Calendario (date_input + time_input) para intervalos (Canc Error)
+                        # =========================
                         st.markdown("#### Comparar dos intervalos de tiempo (calendario) — Canc Error")
 
                         c_avail_dts = df_cmw["C_DT"].dropna()
@@ -1420,8 +1406,6 @@ def main():
             st.plotly_chart(fig_team_canc, width="stretch")
 
             st.subheader("Detalle de cancelaciones (Ejecutivo / Jefe directo)")
-
-            # ✅ show ONLY "Fecha cancelacion" (date+time) and NOT "Fecha" / "Hora" in the table
             detalle_cols = [
                 c
                 for c in [
@@ -1430,11 +1414,8 @@ def main():
                     "Cliente",
                     "Telefono",
                     "Folio",
-                    # single timestamp column (already includes date+time)
-                    "Fecha cancelacion",
-                    "Fecha cancelación",
-                    "Fecha Cancelacion",
-                    "Fecha Cancelación",
+                    "Fecha",
+                    "Hora",
                     "Centro",
                     "Estatus",
                     "Venta",
@@ -1449,7 +1430,7 @@ def main():
                 }
             )
             df_det = df_det.sort_values(
-                [col for col in ["Jefe directo", "Ejecutivo", "Folio"] if col in df_det.columns]
+                [col for col in ["Jefe directo", "Ejecutivo", "Hora", "Folio"] if col in df_det.columns]
             )
 
             st.dataframe(df_det, width="stretch")
@@ -1460,7 +1441,6 @@ def main():
                 file_name=f"detalle_canceladas_{day_sel}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-
 
     # ==================== TAB 3: PROGRAMADAS X SEMANA ====================
     with tabs[3]:

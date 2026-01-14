@@ -242,6 +242,48 @@ def dfs_to_excel_bytes(sheets: dict) -> bytes:
     return output.getvalue()
 
 # -------------------------------------------------
+# ✅ HELPER (ONLY for Back Office tab): parse Back Office datetime robustly
+# (Back Office field from Rastreo has date + hour)
+# - Tries DD/MM and MM/DD and chooses the one inside the selected window.
+# -------------------------------------------------
+def parse_backoffice_datetime(series: pd.Series, window_start: date | None = None, window_end: date | None = None) -> pd.Series:
+    s = series.astype(str).str.strip()
+    s = s.replace({"nan": "", "None": "", "NaT": ""})
+    s = s.where(s != "", np.nan)
+
+    # Extract datetime substring if embedded in longer text
+    if s.notna().any():
+        pat = r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\s+\d{1,2}:\d{2}(?::\d{2})?)|(\d{4}[/-]\d{1,2}[/-]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?)"
+        ext = s.astype(str).str.extract(pat)
+        ext = ext[0].fillna(ext[1])
+        s2 = ext.where(ext.notna(), s)
+    else:
+        s2 = s
+
+    dt_dayfirst = pd.to_datetime(s2, errors="coerce", dayfirst=True)
+    dt_monthfirst = pd.to_datetime(s2, errors="coerce", dayfirst=False)
+
+    # If no window provided, default to dayfirst (MX)
+    if window_start is None or window_end is None:
+        return dt_dayfirst
+
+    w0 = pd.Timestamp(window_start)
+    w1 = pd.Timestamp(window_end) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+
+    in1 = dt_dayfirst.between(w0, w1)
+    in2 = dt_monthfirst.between(w0, w1)
+
+    out = dt_dayfirst.copy()
+
+    # If only monthfirst fits -> take monthfirst
+    out = out.where(~(in2 & ~in1), dt_monthfirst)
+
+    # If dayfirst is NaT but monthfirst has value -> take monthfirst
+    out = out.where(~(dt_dayfirst.isna() & dt_monthfirst.notna()), dt_monthfirst)
+
+    return out
+
+# -------------------------------------------------
 # DB CONNECTION
 # -------------------------------------------------
 @st.cache_resource
@@ -267,14 +309,9 @@ def get_connection():
 
 # -------------------------------------------------
 # LOAD DATA FROM SQL
-# (NO TTL) -> refresh only when user clicks button (we clear cache manually)
 # -------------------------------------------------
 @st.cache_data
 def load_hoja1():
-    """
-    Tabla equivalente a Empleados/Hoja1,
-    pero leyendo directamente de reporte_empleado en SQL.
-    """
     sql = """
     SELECT DISTINCT
         e.[Nombre Completo] AS NombreCompleto,
@@ -322,10 +359,6 @@ def load_hoja1():
 
 @st.cache_data
 def load_consulta1(fecha_ini: date, fecha_fin: date) -> pd.DataFrame:
-    """
-    Replica VentasNC base pero para el rango seleccionado.
-    Usamos SELECT * para garantizar que venga Cliente y Telefono.
-    """
     fi = fecha_ini.strftime("%Y%m%d")
     ff = fecha_fin.strftime("%Y%m%d")
 
@@ -344,7 +377,7 @@ def load_consulta1(fecha_ini: date, fecha_fin: date) -> pd.DataFrame:
     return df
 
 # -------------------------------------------------
-# TRANSFORMACIONES COMO EN POWER QUERY (VentasNC)
+# TRANSFORMACIONES
 # -------------------------------------------------
 def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFrame:
     df = df_raw.copy()
@@ -435,7 +468,6 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
     df["Día"] = df["Fecha creacion"].dt.day
     df["Nombre Día"] = df["Fecha creacion"].dt.strftime("%A")
 
-    # ✅ keep the fix you already approved (prevents Plotly reading "YYYY-02" as "Feb")
     df["Año Semana"] = iso["year"].astype(str) + "-W" + iso["week"].astype(str).str.zfill(2)
 
     df["Fecha contacto"] = pd.to_datetime(df["Fecha contacto"], errors="coerce", dayfirst=True)
@@ -447,7 +479,7 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
     return df
 
 # -------------------------------------------------
-# SIN VENTA (replicando medida DAX, mes actual)
+# SIN VENTA
 # -------------------------------------------------
 @st.cache_data
 def build_sin_venta(hoja: pd.DataFrame, consulta: pd.DataFrame, ref_date: date) -> pd.DataFrame:
@@ -506,7 +538,6 @@ def kpi_solicitados(df: pd.DataFrame) -> int:
 def kpi_total_sinventa(df_sinventa: pd.DataFrame) -> int:
     return int(df_sinventa.shape[0])
 
-# ✅ EXACT Power BI DAX logic (ALL(VentasNC))
 def kpi_validacion_pbi_all(ventasnc_all: pd.DataFrame) -> int:
     if ventasnc_all.empty or "Estatus" not in ventasnc_all.columns or "Venta" not in ventasnc_all.columns:
         return 0
@@ -527,7 +558,6 @@ def main():
 
     st.sidebar.header("Filtros")
 
-    # ✅ ONLY refresh SQL data when user clicks this button
     if st.sidebar.button("🔄 Actualizar datos"):
         st.cache_data.clear()
         st.cache_resource.clear()
@@ -535,7 +565,7 @@ def main():
         st.rerun()
 
     default_start = PBI_START
-    default_end = min(date.today(), PBI_END)  # ✅ end date defaults to current day (bounded by PBI_END)
+    default_end = min(date.today(), PBI_END)
 
     fecha_ini = st.sidebar.date_input("Fecha inicio", default_start)
     fecha_fin = st.sidebar.date_input("Fecha fin", default_end)
@@ -544,16 +574,11 @@ def main():
         st.sidebar.error("La fecha inicio no puede ser mayor que la fecha fin.")
         return
 
-    # ✅ Load SQL base ONLY once per session (or when user clicks refresh)
     if st.session_state["base_data"] is None:
         with st.spinner("Cargando datos desde SQL..."):
             hoja = load_hoja1()
-
-            # ✅ Load SAME base window as Power BI
             consulta_raw_base = load_consulta1(PBI_START, PBI_END)
             consulta_base = transform_consulta1(consulta_raw_base, hoja)
-
-            # ✅ Validación ignores slicers (ALL(VentasNC))
             validacion_pbi = kpi_validacion_pbi_all(consulta_base)
 
             st.session_state["base_data"] = {
@@ -566,14 +591,13 @@ def main():
     consulta_base = st.session_state["base_data"]["consulta_base"]
     validacion_pbi = st.session_state["base_data"]["validacion_pbi"]
 
-    # ✅ Apply Streamlit date range AFTER base load (rest of dashboard)
+    # ✅ The rest of the dashboard still uses creation-date filtering (as your code already does)
     consulta = consulta_base[
         (consulta_base["Fecha"] >= fecha_ini) & (consulta_base["Fecha"] <= fecha_fin)
     ].copy()
 
     sinventa = build_sin_venta(hoja, consulta, fecha_fin)
 
-    # ---- Filtros de Centro, Supervisor, Mes ----
     centros = ["All"] + sorted([c for c in consulta["Centro Original"].dropna().unique().tolist()])
     supervisores = ["All"] + sorted([s for s in consulta["Jefe directo"].dropna().unique().tolist()])
     meses = ["All"] + sorted(consulta["Mes"].unique().tolist())
@@ -582,7 +606,6 @@ def main():
     supervisor_sel = st.sidebar.selectbox("Supervisor", supervisores, index=0)
     mes_sel = st.sidebar.selectbox("Mes (Fecha creación)", meses, index=0)
 
-    # Para opciones de Ejecutivo: mismo contexto que Detalle General (con mes)
     df_for_exec = consulta.copy()
     if centro_sel != "All":
         df_for_exec = df_for_exec[df_for_exec["Centro Original"] == centro_sel]
@@ -595,7 +618,6 @@ def main():
     ejecutivos = ["All"] + sorted([e for e in df_for_exec["Vendedor"].dropna().unique().tolist()])
     ejecutivo_sel = st.sidebar.selectbox("Ejecutivo", ejecutivos, index=0)
 
-    # ---- Construir df BASE (sin filtro de Mes) ----
     df_no_month = consulta.copy()
     if centro_sel != "All":
         df_no_month = df_no_month[df_no_month["Centro Original"] == centro_sel]
@@ -604,18 +626,15 @@ def main():
     if ejecutivo_sel != "All":
         df_no_month = df_no_month[df_no_month["Vendedor"] == ejecutivo_sel]
 
-    # ---- df con filtro de Mes (para el resto del dashboard) ----
     df = df_no_month.copy()
     if mes_sel != "All":
         df = df[df["Mes"] == mes_sel]
 
-    # -------- SinVenta filtrado por supervisor (si aplica) --------
     sinv_fil = sinventa.copy()
     if supervisor_sel != "All":
         sinv_fil = sinv_fil[sinv_fil["JefeDirecto"] == supervisor_sel]
     sinv_fil = sinv_fil[sinv_fil["JefeDirecto"] != "ENCUBADORA"]
 
-    # ----------- Tabs -----------
     tabs = st.tabs(
         [
             "Resumen",
@@ -655,7 +674,6 @@ def main():
 
         st.metric("Entregados sin venta (Validación)", validacion_pbi)
 
-        # ✅ include En Tránsito detail in the same Excel download (extra sheet)
         cols_en_t_resumen = [
             c for c in [
                 "Jefe directo",
@@ -697,101 +715,126 @@ def main():
     with tabs[1]:
         st.subheader("Back Office")
 
-        bo_col = df["Back Office"].astype(str).str.strip()
-        df_back = df[(bo_col != "") & (df["Estatus"] != "Canc Error")].copy()
-
-        if df_back.empty:
-            st.info("No hay registros con datos en la columna 'Back Office' para los filtros actuales.")
+        # ✅ Back Office MUST be counted by Rastreo timestamp and must IGNORE "Fecha creacion"
+        if "Back Office" not in consulta_base.columns:
+            st.info("No existe la columna 'Back Office' en los datos.")
         else:
-            by_day = df_back.groupby("Fecha", as_index=False).size()
-            fig = px.bar(
-                by_day,
-                x="Fecha",
-                y="size",
-                title="Total por día (Back Office)",
-                labels={"size": "Total Back Office"},
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            df_bo_ctx = consulta_base.copy()
 
-            day_options = sorted(by_day["Fecha"].unique())
-            today = date.today()
-            default_index = day_options.index(today) if today in day_options else len(day_options) - 1
+            # Apply same slicers except Mes (Mes is creation-date based)
+            if centro_sel != "All":
+                df_bo_ctx = df_bo_ctx[df_bo_ctx["Centro Original"] == centro_sel]
+            if supervisor_sel != "All":
+                df_bo_ctx = df_bo_ctx[df_bo_ctx["Jefe directo"] == supervisor_sel]
+            if ejecutivo_sel != "All":
+                df_bo_ctx = df_bo_ctx[df_bo_ctx["Vendedor"] == ejecutivo_sel]
 
-            day_sel = st.selectbox(
-                "Selecciona un día para ver el desglose por hora y equipo",
-                day_options,
-                index=default_index,
-            )
-            df_day = df_back[df_back["Fecha"] == day_sel]
+            bo_dt = parse_backoffice_datetime(df_bo_ctx["Back Office"], window_start=fecha_ini, window_end=fecha_fin)
 
-            by_hour_total = df_day.groupby("Hora", as_index=False).size()
-            fig_total = px.bar(
-                by_hour_total,
-                x="Hora",
-                y="size",
-                title=f"Total Back Office por hora – {day_sel}",
-                labels={"size": "Total Back Office"},
-            )
-            st.plotly_chart(fig_total, use_container_width=True)
+            df_back = df_bo_ctx[(df_bo_ctx["Estatus"] != "Canc Error") & (bo_dt.notna())].copy()
+            df_back["BO_DT"] = bo_dt
+            df_back["BO_Fecha"] = df_back["BO_DT"].dt.date
+            df_back["BO_Hora"] = df_back["BO_DT"].dt.hour
 
-            by_hour_team = (
-                df_day.groupby(["Hora", "Jefe directo"], as_index=False)
-                .size()
-                .rename(columns={"size": "Total"})
-            )
+            # ✅ STRICT: show ONLY records whose BO date is inside the selected date filter
+            df_back = df_back[(df_back["BO_Fecha"] >= fecha_ini) & (df_back["BO_Fecha"] <= fecha_fin)].copy()
 
-            fig_team = px.bar(
-                by_hour_team,
-                x="Hora",
-                y="Total",
-                color="Jefe directo",
-                barmode="group",
-                title=f"Back Office por hora y equipo – {day_sel}",
-                labels={
-                    "Total": "Total Back Office",
-                    "Hora": "Hora",
-                    "Jefe directo": "Supervisor",
-                },
-            )
-            st.plotly_chart(fig_team, use_container_width=True)
+            if df_back.empty:
+                st.info("No hay registros Back Office (por fecha/hora de Rastreo) dentro del rango seleccionado.")
+            else:
+                by_day = df_back.groupby("BO_Fecha", as_index=False).size()
+                fig = px.bar(
+                    by_day,
+                    x="BO_Fecha",
+                    y="size",
+                    title="Total por día (Back Office) — por fecha/hora de Back Office (Rastreo)",
+                    labels={"size": "Total Back Office", "BO_Fecha": "Fecha Back Office"},
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
-            st.subheader("Detalle Back Office (Ejecutivo / Jefe directo)")
-            detalle_cols_bo = [
-                c
-                for c in [
-                    "Jefe directo",
-                    "Vendedor",
-                    "Cliente",
-                    "Telefono",
-                    "Folio",
-                    "Fecha",
-                    "Hora",
-                    "Centro",
-                    "Estatus",
-                    "Back Office",
-                    "Venta",
+                day_options = sorted(by_day["BO_Fecha"].unique())
+                today = date.today()
+                default_index = day_options.index(today) if today in day_options else len(day_options) - 1
+
+                day_sel = st.selectbox(
+                    "Selecciona un día para ver el desglose por hora y equipo",
+                    day_options,
+                    index=default_index,
+                    key="bo_day_sel",
+                )
+
+                df_day = df_back[df_back["BO_Fecha"] == day_sel].copy()
+
+                by_hour_total = df_day.groupby("BO_Hora", as_index=False).size()
+                fig_total = px.bar(
+                    by_hour_total,
+                    x="BO_Hora",
+                    y="size",
+                    title=f"Total Back Office por hora – {day_sel} (hora Back Office)",
+                    labels={"size": "Total Back Office", "BO_Hora": "Hora Back Office"},
+                )
+                st.plotly_chart(fig_total, use_container_width=True)
+
+                by_hour_team = (
+                    df_day.groupby(["BO_Hora", "Jefe directo"], as_index=False)
+                    .size()
+                    .rename(columns={"size": "Total"})
+                )
+
+                fig_team = px.bar(
+                    by_hour_team,
+                    x="BO_Hora",
+                    y="Total",
+                    color="Jefe directo",
+                    barmode="group",
+                    title=f"Back Office por hora y equipo – {day_sel} (hora Back Office)",
+                    labels={
+                        "Total": "Total Back Office",
+                        "BO_Hora": "Hora Back Office",
+                        "Jefe directo": "Supervisor",
+                    },
+                )
+                st.plotly_chart(fig_team, use_container_width=True)
+
+                st.subheader("Detalle Back Office (Ejecutivo / Jefe directo)")
+                detalle_cols_bo = [
+                    c
+                    for c in [
+                        "Jefe directo",
+                        "Vendedor",
+                        "Cliente",
+                        "Telefono",
+                        "Folio",
+                        "BO_Fecha",
+                        "BO_Hora",
+                        "Centro",
+                        "Estatus",
+                        "Back Office",
+                        "Venta",
+                    ]
+                    if c in df_day.columns
                 ]
-                if c in df_day.columns
-            ]
 
-            df_det_bo = df_day[detalle_cols_bo].rename(
-                columns={
-                    "Vendedor": "Ejecutivo",
-                    "Telefono": "Telefono cliente",
-                }
-            )
-            df_det_bo = df_det_bo.sort_values(
-                [col for col in ["Jefe directo", "Ejecutivo", "Hora", "Folio"] if col in df_det_bo.columns]
-            )
+                df_det_bo = df_day[detalle_cols_bo].rename(
+                    columns={
+                        "Vendedor": "Ejecutivo",
+                        "Telefono": "Telefono cliente",
+                        "BO_Fecha": "Fecha Back Office",
+                        "BO_Hora": "Hora Back Office",
+                    }
+                )
+                df_det_bo = df_det_bo.sort_values(
+                    [col for col in ["Jefe directo", "Ejecutivo", "Fecha Back Office", "Hora Back Office", "Folio"] if col in df_det_bo.columns]
+                )
 
-            st.dataframe(df_det_bo)
+                st.dataframe(df_det_bo)
 
-            st.download_button(
-                "Descargar Detalle Back Office (Excel)",
-                data=df_to_excel_bytes(df_det_bo, "DetalleBackOffice"),
-                file_name=f"detalle_backoffice_{day_sel}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+                st.download_button(
+                    "Descargar Detalle Back Office (Excel)",
+                    data=df_to_excel_bytes(df_det_bo, "DetalleBackOffice"),
+                    file_name=f"detalle_backoffice_{day_sel}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
 
     # ==================== TAB 2: CANCELADAS ====================
     with tabs[2]:
@@ -894,7 +937,6 @@ def main():
     with tabs[3]:
         st.subheader("Programadas por semana")
 
-        # ✅ Use DF WITHOUT Mes filter so weeks can include Dec days for January's first week
         df_prog_base = df_no_month[df_no_month["Estatus"] != "Canc Error"].copy()
 
         if df_prog_base.empty:
@@ -902,8 +944,6 @@ def main():
         else:
             df_prog = df_prog_base
 
-            # ✅ If user selected a month, expand to FULL ISO weeks that intersect that month
-            # (this fixes: first week of January includes Dec 29-31, etc.)
             if mes_sel != "All":
                 month_rows = df_no_month[df_no_month["Mes"] == mes_sel].copy()
                 if not month_rows.empty:
@@ -911,8 +951,8 @@ def main():
                     end_ts = pd.to_datetime(month_rows["Fecha creacion"], errors="coerce").max()
 
                     if pd.notna(start_ts) and pd.notna(end_ts):
-                        week_start = start_ts - pd.Timedelta(days=int(start_ts.weekday()))          # Monday
-                        week_end = end_ts + pd.Timedelta(days=int(6 - end_ts.weekday()))            # Sunday
+                        week_start = start_ts - pd.Timedelta(days=int(start_ts.weekday()))
+                        week_end = end_ts + pd.Timedelta(days=int(6 - end_ts.weekday()))
 
                         df_prog = df_prog_base[
                             (df_prog_base["Fecha creacion"] >= week_start)

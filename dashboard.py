@@ -1090,6 +1090,79 @@ def main():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
 
+                # ==========================================================
+                # ✅ NEW: DOWNLOAD BACK OFFICE REPORT BY USER-SELECTED INTERVAL (CALENDAR)
+                # ==========================================================
+                st.markdown("### Descargar reporte Back Office por intervalo (calendario)")
+
+                bo_dates_all = sorted(df_back["BO_Fecha"].dropna().unique().tolist())
+                if not bo_dates_all:
+                    st.info("No hay fechas Back Office disponibles para descargar.")
+                else:
+                    bo_min_d = bo_dates_all[0]
+                    bo_max_d = bo_dates_all[-1]
+
+                    bo_range = st.date_input(
+                        "Selecciona el intervalo (Back Office)",
+                        value=(bo_min_d, bo_max_d),
+                        min_value=bo_min_d,
+                        max_value=bo_max_d,
+                        key="bo_dl_range_calendar",
+                    )
+
+                    if isinstance(bo_range, tuple) and len(bo_range) == 2:
+                        dl_start_d, dl_end_d = bo_range
+                    else:
+                        dl_start_d = bo_range
+                        dl_end_d = bo_range
+
+                    df_interval = df_back[
+                        (df_back["BO_Fecha"] >= dl_start_d) & (df_back["BO_Fecha"] <= dl_end_d)
+                    ].copy()
+
+                    if df_interval.empty:
+                        st.info("No hay datos Back Office en el intervalo seleccionado.")
+                    else:
+                        st.metric("Total Back Office (intervalo)", int(df_interval.shape[0]))
+
+                        detalle_cols_int = [
+                            c
+                            for c in [
+                                "Jefe directo",
+                                "Vendedor",
+                                "Cliente",
+                                "Telefono",
+                                "Folio",
+                                "BO_Fecha",
+                                "BO_Hora",
+                                "Centro",
+                                "Estatus",
+                                "Back Office",
+                                "Venta",
+                            ]
+                            if c in df_interval.columns
+                        ]
+
+                        df_det_interval = df_interval[detalle_cols_int].rename(
+                            columns={
+                                "Vendedor": "Ejecutivo",
+                                "Telefono": "Telefono cliente",
+                                "BO_Fecha": "Fecha Back Office",
+                                "BO_Hora": "Hora Back Office",
+                            }
+                        )
+
+                        df_det_interval = df_det_interval.sort_values(
+                            [col for col in ["Jefe directo", "Ejecutivo", "Fecha Back Office", "Hora Back Office", "Folio"] if col in df_det_interval.columns]
+                        )
+
+                        st.download_button(
+                            "Descargar Back Office (Excel) — Intervalo",
+                            data=df_to_excel_bytes(df_det_interval, "BackOfficeIntervalo"),
+                            file_name=f"backoffice_intervalo_{dl_start_d}_{dl_end_d}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        )
+
     # ==================== TAB 2: CANCELADAS ====================
     with tabs[2]:
         st.subheader("Canceladas (Canc Error)")

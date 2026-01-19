@@ -278,6 +278,34 @@ def parse_backoffice_datetime(series: pd.Series, window_start: date | None = Non
 def _trim_time_to_minute(t: time) -> time:
     return t.replace(second=0, microsecond=0)
 
+def add_bar_value_labels(fig):
+    """
+    Adds value labels to BAR traces ONLY when they don't already have text/texttemplate.
+    Keeps existing charts unchanged if they already define labels.
+    """
+    try:
+        for tr in getattr(fig, "data", []) or []:
+            if getattr(tr, "type", "") != "bar":
+                continue
+
+            # If the bar already has labels, don't touch it
+            has_text = tr.text is not None and np.size(tr.text) > 0
+            has_template = bool(getattr(tr, "texttemplate", "") or "")
+            if has_text or has_template:
+                continue
+
+            orient = getattr(tr, "orientation", None) or "v"
+            if orient == "h":
+                tr.update(texttemplate="%{x:,.0f}", textposition="outside", cliponaxis=False)
+            else:
+                tr.update(texttemplate="%{y:,.0f}", textposition="outside", cliponaxis=False)
+
+        fig.update_layout(uniformtext_minsize=10, uniformtext_mode="hide")
+    except Exception:
+        pass
+    return fig
+
+
 # -------------------------------------------------
 # DB CONNECTION
 # -------------------------------------------------
@@ -755,6 +783,7 @@ def main():
                     title="Total por día (Back Office) — por fecha/hora de Back Office (Rastreo)",
                     labels={"size": "Total Back Office", "BO_Fecha": "Fecha Back Office"},
                 )
+                add_bar_value_labels(fig)
                 st.plotly_chart(fig, width="stretch")
 
                 df_back["BO_MonthKey"] = df_back["BO_DT"].dt.strftime("%Y-%m")
@@ -812,6 +841,7 @@ def main():
                             title="Total por día (Back Office) — filtro por Mes(es) y Semana(s)",
                             labels={"size": "Total Back Office", "BO_Fecha": "Fecha Back Office"},
                         )
+                        add_bar_value_labels(fig)
                         st.plotly_chart(fig_mw, width="stretch")
 
                         st.markdown("### Comparativo día vs día (mes contra mes)")
@@ -839,6 +869,7 @@ def main():
                             },
                         )
                         fig_cmp.update_xaxes(dtick=1)
+                        add_bar_value_labels(fig)
                         st.plotly_chart(fig_cmp, width="stretch")
 
                         st.markdown("#### Comparar dos intervalos de tiempo (calendario)")
@@ -980,6 +1011,7 @@ def main():
                                 labels={"Total": "Total Back Office"},
                                 hover_data={"Inicio": True, "Fin": True, "Comparación": False},
                             )
+                            add_bar_value_labels(fig)
                             st.plotly_chart(fig_dates, width="stretch")
 
                             h1 = df_i1.groupby("BO_Hora").size()
@@ -1004,6 +1036,7 @@ def main():
                                 title="Comparativo por hora — Fecha 1 vs Fecha 2 (Back Office, por intervalo)",
                                 labels={"Total": "Total Back Office", "Hora": "Hora Back Office"},
                             )
+                            add_bar_value_labels(fig)
                             st.plotly_chart(fig_hour, width="stretch")
 
                 day_options = sorted(by_day["BO_Fecha"].unique())
@@ -1027,6 +1060,7 @@ def main():
                     title=f"Total Back Office por hora – {day_sel} (hora Back Office)",
                     labels={"size": "Total Back Office", "BO_Hora": "Hora Back Office"},
                 )
+                add_bar_value_labels(fig)
                 st.plotly_chart(fig_total, width="stretch")
 
                 by_hour_team = (
@@ -1048,6 +1082,7 @@ def main():
                         "Jefe directo": "Supervisor",
                     },
                 )
+                add_bar_value_labels(fig)
                 st.plotly_chart(fig_team, width="stretch")
 
                 st.subheader("Detalle Back Office (Ejecutivo / Jefe directo)")
@@ -1197,6 +1232,7 @@ def main():
                 title="Canceladas por día",
                 labels={"size": "Total Canc Error"},
             )
+            add_bar_value_labels(fig)
             st.plotly_chart(fig, width="stretch")
 
             # =========================
@@ -1271,6 +1307,7 @@ def main():
                             title="Total por día (Canc Error) — filtro por Mes(es) y Semana(s)",
                             labels={"size": "Total Canc Error", "C_Fecha": "Fecha"},
                         )
+                        add_bar_value_labels(fig)
                         st.plotly_chart(fig_cmw, width="stretch")
 
                         st.markdown("### Comparativo día vs día (mes contra mes) — Canc Error")
@@ -1296,6 +1333,7 @@ def main():
                             },
                         )
                         fig_cmp_c.update_xaxes(dtick=1)
+                        add_bar_value_labels(fig)
                         st.plotly_chart(fig_cmp_c, width="stretch")
 
                         st.markdown("#### Comparar dos intervalos de tiempo (calendario) — Canc Error")
@@ -1437,6 +1475,7 @@ def main():
                                 labels={"Total": "Total Canc Error"},
                                 hover_data={"Inicio": True, "Fin": True, "Comparación": False},
                             )
+                            add_bar_value_labels(fig)
                             st.plotly_chart(fig_c_dates, width="stretch")
 
                             ch1 = df_cd1.groupby("C_Hora").size()
@@ -1460,6 +1499,7 @@ def main():
                                 title="Comparativo por hora — Fecha 1 vs Fecha 2 (Canc Error, por intervalo)",
                                 labels={"Total": "Total Canc Error", "Hora": "Hora"},
                             )
+                            add_bar_value_labels(fig)
                             st.plotly_chart(fig_c_hour, width="stretch")
 
             # ---- existing day drilldown (kept) ----
@@ -1482,6 +1522,7 @@ def main():
                 title=f"Desglose por hora – {day_sel}",
                 labels={"size": "Total Canc Error"},
             )
+            add_bar_value_labels(fig2)
             st.plotly_chart(fig2, width="stretch")
 
             by_hour_team = (
@@ -1503,6 +1544,7 @@ def main():
                     "Jefe directo": "Supervisor",
                 },
             )
+            add_bar_value_labels(fig)
             st.plotly_chart(fig_team_canc, width="stretch")
 
             st.subheader("Detalle de cancelaciones (Ejecutivo / Jefe directo)")
@@ -1582,6 +1624,7 @@ def main():
                 labels={"size": "Total Programadas"},
             )
             fig.update_xaxes(type="category")
+            add_bar_value_labels(fig)
             st.plotly_chart(fig, width="stretch")
 
             st.download_button(
@@ -1625,6 +1668,7 @@ def main():
                 margin=dict(l=260, r=40, t=60, b=40),
                 yaxis=dict(automargin=True),
             )
+            add_bar_value_labels(fig)
             st.plotly_chart(fig, width="stretch")
 
             st.subheader("Ranking completo (todos los ejecutivos)")
@@ -1725,6 +1769,7 @@ def main():
             )
             fig.update_traces(textposition="inside", textinfo="label+percent")
             fig.update_layout(showlegend=True)
+            #add_bar_value_labels(fig)
             st.plotly_chart(fig, width="stretch")
 
             st.download_button(

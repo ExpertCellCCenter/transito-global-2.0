@@ -633,7 +633,14 @@ def main():
 
     centros = ["All"] + sorted([c for c in consulta["Centro Original"].dropna().unique().tolist()])
     supervisores = ["All"] + sorted([s for s in consulta["Jefe directo"].dropna().unique().tolist()])
-    meses = ["All"] + sorted(consulta["Mes"].unique().tolist())
+    # ✅ months from selected calendar range (even if no data)
+    month_range = pd.date_range(
+        pd.Timestamp(fecha_ini).replace(day=1),
+        pd.Timestamp(fecha_fin).replace(day=1),
+        freq="MS"
+    )
+    meses = ["All"] + [d.strftime("%B") for d in month_range]
+
 
     centro_sel = st.sidebar.selectbox("Centro", centros, index=0)
     supervisor_sel = st.sidebar.selectbox("Supervisor", supervisores, index=0)

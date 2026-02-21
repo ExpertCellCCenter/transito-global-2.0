@@ -185,6 +185,26 @@ def df_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Datos") -> bytes:
     output.seek(0)
     return output.getvalue()
 
+def choose_backoffice_dt(df: pd.DataFrame, window_start: date, window_end: date) -> pd.Series:
+    # Usa columnas pre-parsed si existen (rápido)
+    if "BO_DT_DF" in df.columns and "BO_DT_MF" in df.columns:
+        dt_dayfirst = df["BO_DT_DF"]
+        dt_monthfirst = df["BO_DT_MF"]
+
+        w0 = pd.Timestamp(window_start)
+        w1 = pd.Timestamp(window_end) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+
+        in1 = dt_dayfirst.between(w0, w1)
+        in2 = dt_monthfirst.between(w0, w1)
+
+        out = dt_dayfirst.copy()
+        out = out.where(~(in2 & ~in1), dt_monthfirst)
+        out = out.where(~(dt_dayfirst.isna() & dt_monthfirst.notna()), dt_monthfirst)
+        return out
+
+    # Fallback (si por alguna razón no existieran)
+    return parse_backoffice_datetime(df["Back Office"], window_start=window_start, window_end=window_end)
+
 # -------------------------------------------------
 # MULTI-SHEET EXCEL (Resumen download incl. En Tránsito detail)
 # -------------------------------------------------
@@ -476,21 +496,18 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
     )
     df.drop(columns=["Nombre Completo"], inplace=True, errors="ignore")
 
-    def status_calc(row):
-        est = row.get("Estatus")
-        venta = row.get("Venta")
+    # ✅ MUCHÍSIMO más rápido que df.apply(...)
+    E = df["Estatus"].astype(str).str.strip()
 
-        if est in ("En entrega", "En preparacion", "Solicitado", "Back Office"):
-            return "En Transito"
+    venta = df["Venta"] if "Venta" in df.columns else pd.Series(np.nan, index=df.index)
+    venta_vacia = venta.isna() | venta.astype(str).str.strip().eq("")
 
-        venta_vacia = pd.isna(venta) or (isinstance(venta, str) and venta == "")
+    en_transito = (
+        E.isin(["En entrega", "En preparacion", "Solicitado", "Back Office"])
+        | (E.eq("Entregado") & venta_vacia)
+    )
 
-        if est == "Entregado" and venta_vacia:
-            return "En Transito"
-
-        return "Entregado"
-
-    df["Status"] = df.apply(status_calc, axis=1)
+    df["Status"] = np.where(en_transito, "En Transito", "Entregado")
 
     df["Fecha creacion"] = pd.to_datetime(df["Fecha creacion"], errors="coerce", dayfirst=True)
     df["Fecha"] = df["Fecha creacion"].dt.date
@@ -511,6 +528,25 @@ def transform_consulta1(df_raw: pd.DataFrame, hoja: pd.DataFrame) -> pd.DataFram
 
     df["Jefe directo"] = df["Jefe directo"].fillna("").astype(str).str.strip()
     df["Jefe directo"] = df["Jefe directo"].replace("", "ENCUBADORA")
+
+    # =========================================================
+    # ✅ SPEEDUP: pre-parse Back Office datetimes ONCE
+    # =========================================================
+    if "Back Office" in df.columns:
+        s = df["Back Office"].astype(str).str.strip()
+        s = s.replace({"nan": "", "None": "", "NaT": ""})
+        s = s.where(s != "", np.nan)
+
+        if s.notna().any():
+            pat = r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\s+\d{1,2}:\d{2}(?::\d{2})?)|(\d{4}[/-]\d{1,2}[/-]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?)"
+            ext = s.astype(str).str.extract(pat)
+            ext = ext[0].fillna(ext[1])
+            s2 = ext.where(ext.notna(), s)
+        else:
+            s2 = s
+
+        df["BO_DT_DF"] = pd.to_datetime(s2, errors="coerce", dayfirst=True)
+        df["BO_DT_MF"] = pd.to_datetime(s2, errors="coerce", dayfirst=False)
 
     return df
 
@@ -758,16 +794,19 @@ def main():
         if "Back Office" not in consulta_base.columns:
             st.info("No existe la columna 'Back Office' en los datos.")
         else:
-            df_bo_ctx = consulta_base.copy()
+            df_bo_ctx = consulta_base  # sin copy
+            mask = pd.Series(True, index=df_bo_ctx.index)
 
             if centro_sel != "All":
-                df_bo_ctx = df_bo_ctx[df_bo_ctx["Centro Original"] == centro_sel]
+                mask &= (df_bo_ctx["Centro Original"] == centro_sel)
             if supervisor_sel != "All":
-                df_bo_ctx = df_bo_ctx[df_bo_ctx["Jefe directo"] == supervisor_sel]
+                mask &= (df_bo_ctx["Jefe directo"] == supervisor_sel)
             if ejecutivo_sel != "All":
-                df_bo_ctx = df_bo_ctx[df_bo_ctx["Vendedor"] == ejecutivo_sel]
+                mask &= (df_bo_ctx["Vendedor"] == ejecutivo_sel)
 
-            bo_dt = parse_backoffice_datetime(df_bo_ctx["Back Office"], window_start=fecha_ini, window_end=fecha_fin)
+            df_bo_ctx = df_bo_ctx.loc[mask].copy()  # ✅ una sola copia final
+
+            bo_dt = choose_backoffice_dt(df_bo_ctx, window_start=fecha_ini, window_end=fecha_fin)
 
             df_back = df_bo_ctx[(df_bo_ctx["Estatus"] != "Canc Error") & (bo_dt.notna())].copy()
             df_back["BO_DT"] = bo_dt
@@ -1166,6 +1205,70 @@ def main():
                         st.info("No hay datos Back Office en el intervalo seleccionado.")
                     else:
                         st.metric("Total Back Office (intervalo)", int(df_interval.shape[0]))
+                        
+                        # ---------------------------------------------------------
+                        # ✅ NEW: Visualización por equipo (Supervisor) — intervalo seleccionado
+                        # ---------------------------------------------------------
+                        st.markdown("---")
+                        st.markdown("### 👥 Back Office por Equipo (Supervisor) — intervalo seleccionado")
+
+                        if "Jefe directo" in df_interval.columns:
+                            team_bo = (
+                                df_interval.groupby("Jefe directo", as_index=False)
+                                .agg(
+                                    Total_BackOffice=("BO_DT", "count") if "BO_DT" in df_interval.columns else ("Back Office", "count"),
+                                    Ejecutivos=("Vendedor", "nunique") if "Vendedor" in df_interval.columns else ("Jefe directo", "size"),
+                                )
+                                .copy()
+                            )
+
+                            # Label for bars
+                            team_bo["Etiqueta"] = team_bo.apply(
+                                lambda r: f"{int(r['Total_BackOffice']):,} back office | {int(r['Ejecutivos']):,} ejecutivos",
+                                axis=1,
+                            )
+
+                            team_bo = team_bo.sort_values("Total_BackOffice", ascending=False).reset_index(drop=True)
+
+                            if team_bo.empty:
+                                st.info("No hay datos suficientes para agrupar por supervisor en el intervalo seleccionado.")
+                            else:
+                                dyn_h = max(360, 140 + 32 * len(team_bo))
+
+                                fig_team_interval = px.bar(
+                                    team_bo.sort_values("Total_BackOffice", ascending=True),
+                                    x="Total_BackOffice",
+                                    y="Jefe directo",
+                                    orientation="h",
+                                    text="Etiqueta",
+                                    title=f"Back Office por Supervisor — {dl_start_d} → {dl_end_d}",
+                                    labels={"Jefe directo": "Supervisor", "Total_BackOffice": "Total Back Office"},
+                                )
+                                fig_team_interval.update_traces(textposition="outside", cliponaxis=False)
+                                fig_team_interval.update_layout(
+                                    height=dyn_h,
+                                    margin=dict(l=320, r=30, t=70, b=20),
+                                    yaxis=dict(automargin=True),
+                                )
+                                add_bar_value_labels(fig_team_interval)
+                                st.plotly_chart(fig_team_interval, width="stretch", key=f"bo_team_interval_{dl_start_d}_{dl_end_d}")
+
+                                # Table + TOTAL row
+                                team_show = team_bo[["Jefe directo", "Total_BackOffice", "Ejecutivos"]].copy()
+                                total_row = pd.DataFrame([{
+                                    "Jefe directo": "TOTAL",
+                                    "Total_BackOffice": int(team_show["Total_BackOffice"].sum()),
+                                    "Ejecutivos": int(team_show["Ejecutivos"].sum()),
+                                }])
+                                team_show = pd.concat([team_show, total_row], ignore_index=True)
+
+                                st.dataframe(
+                                    team_show.style.format({"Total_BackOffice": "{:,.0f}", "Ejecutivos": "{:,.0f}"}),
+                                    width="stretch",
+                                    hide_index=True,
+                                )
+                        else:
+                            st.info("No existe la columna 'Jefe directo' para agrupar por supervisor.")
 
                         detalle_cols_int = [
                             c

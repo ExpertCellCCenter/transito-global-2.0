@@ -1659,7 +1659,16 @@ def main():
 
             st.subheader("Detalle de cancelaciones (Ejecutivo / Jefe directo)")
 
-            # ✅ show ONLY "Fecha cancelacion" (date+time) and NOT "Fecha" / "Hora" in the table
+            df_day_det = df_day.copy()
+
+            if "Back Office" in df_day_det.columns:
+                df_day_det["Fecha Back Office"] = choose_backoffice_dt(
+                    df_day_det,
+                    window_start=fecha_ini,
+                    window_end=fecha_fin
+                ).dt.date
+
+            # ✅ show ONLY "Fecha cancelacion" (date+time) and add "Fecha Back Office"
             detalle_cols = [
                 c
                 for c in [
@@ -1668,6 +1677,7 @@ def main():
                     "Cliente",
                     "Telefono",
                     "Folio",
+                    "Fecha Back Office",
                     # single timestamp column (already includes date+time)
                     "Fecha cancelacion",
                     "Fecha cancelación",
@@ -1677,17 +1687,17 @@ def main():
                     "Estatus",
                     "Venta",
                 ]
-                if c in df_day.columns
+                if c in df_day_det.columns
             ]
 
-            df_det = df_day[detalle_cols].rename(
+            df_det = df_day_det[detalle_cols].rename(
                 columns={
                     "Vendedor": "Ejecutivo",
                     "Telefono": "Telefono cliente",
                 }
             )
             df_det = df_det.sort_values(
-                [col for col in ["Jefe directo", "Ejecutivo", "Folio"] if col in df_det.columns]
+                [col for col in ["Jefe directo", "Ejecutivo", "Fecha Back Office", "Folio"] if col in df_det.columns]
             )
 
             st.dataframe(df_det, width="stretch")

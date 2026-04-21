@@ -1659,55 +1659,139 @@ def main():
 
             st.subheader("Detalle de cancelaciones (Ejecutivo / Jefe directo)")
 
-            df_day_det = df_day.copy()
+            modo_det_cancel = st.radio(
+                "Modo de detalle de cancelaciones",
+                options=["Por día", "Por intervalo"],
+                horizontal=True,
+                key="canc_det_mode",
+            )
 
-            if "Back Office" in df_day_det.columns:
-                df_day_det["Fecha Back Office"] = choose_backoffice_dt(
-                    df_day_det,
-                    window_start=fecha_ini,
-                    window_end=fecha_fin
-                ).dt.date
+            if modo_det_cancel == "Por día":
+                df_det_src = df_day.copy()
 
-            # ✅ show ONLY "Fecha cancelacion" (date+time) and add "Fecha Back Office"
-            detalle_cols = [
-                c
-                for c in [
-                    "Jefe directo",
-                    "Vendedor",
-                    "Cliente",
-                    "Telefono",
-                    "Folio",
-                    "Fecha Back Office",
-                    # single timestamp column (already includes date+time)
-                    "Fecha cancelacion",
-                    "Fecha cancelación",
-                    "Fecha Cancelacion",
-                    "Fecha Cancelación",
-                    "Centro",
-                    "Estatus",
-                    "Venta",
+                if "Back Office" in df_det_src.columns:
+                    df_det_src["Fecha Back Office"] = choose_backoffice_dt(
+                        df_det_src,
+                        window_start=fecha_ini,
+                        window_end=fecha_fin
+                    ).dt.date
+
+                detalle_cols = [
+                    c
+                    for c in [
+                        "Jefe directo",
+                        "Vendedor",
+                        "Cliente",
+                        "Telefono",
+                        "Folio",
+                        "Fecha Back Office",
+                        "Fecha cancelacion",
+                        "Fecha cancelación",
+                        "Fecha Cancelacion",
+                        "Fecha Cancelación",
+                        "Centro",
+                        "Estatus",
+                        "Venta",
+                    ]
+                    if c in df_det_src.columns
                 ]
-                if c in df_day_det.columns
-            ]
 
-            df_det = df_day_det[detalle_cols].rename(
-                columns={
-                    "Vendedor": "Ejecutivo",
-                    "Telefono": "Telefono cliente",
-                }
-            )
-            df_det = df_det.sort_values(
-                [col for col in ["Jefe directo", "Ejecutivo", "Fecha Back Office", "Folio"] if col in df_det.columns]
-            )
+                df_det = df_det_src[detalle_cols].rename(
+                    columns={
+                        "Vendedor": "Ejecutivo",
+                        "Telefono": "Telefono cliente",
+                    }
+                )
 
-            st.dataframe(df_det, width="stretch")
+                df_det = df_det.sort_values(
+                    [col for col in ["Jefe directo", "Ejecutivo", "Fecha Back Office", "Folio"] if col in df_det.columns]
+                )
 
-            st.download_button(
-                "Descargar Detalle Canceladas (Excel)",
-                data=df_to_excel_bytes(df_det, "DetalleCanceladas"),
-                file_name=f"detalle_canceladas_{day_sel}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+                st.dataframe(df_det, width="stretch")
+
+                st.download_button(
+                    "Descargar Detalle Canceladas (Excel) — Día",
+                    data=df_to_excel_bytes(df_det, "DetalleCanceladasDia"),
+                    file_name=f"detalle_canceladas_{day_sel}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+
+            else:
+                fechas_cancel_all = sorted(df_canc_ctx["C_Fecha"].dropna().unique().tolist())
+
+                if not fechas_cancel_all:
+                    st.info("No hay fechas disponibles para descargar el detalle por intervalo.")
+                else:
+                    min_cancel_date = fechas_cancel_all[0]
+                    max_cancel_date = fechas_cancel_all[-1]
+
+                    rango_cancel = st.date_input(
+                        "Selecciona el intervalo de cancelaciones",
+                        value=(min_cancel_date, max_cancel_date),
+                        min_value=min_cancel_date,
+                        max_value=max_cancel_date,
+                        key="canc_det_range",
+                    )
+
+                    if isinstance(rango_cancel, tuple) and len(rango_cancel) == 2:
+                        canc_ini, canc_fin = rango_cancel
+                    else:
+                        canc_ini = rango_cancel
+                        canc_fin = rango_cancel
+
+                    df_det_src = df_canc_ctx[
+                        (df_canc_ctx["C_Fecha"] >= canc_ini) & (df_canc_ctx["C_Fecha"] <= canc_fin)
+                    ].copy()
+
+                    if df_det_src.empty:
+                        st.info("No hay canceladas en el intervalo seleccionado.")
+                    else:
+                        if "Back Office" in df_det_src.columns:
+                            df_det_src["Fecha Back Office"] = choose_backoffice_dt(
+                                df_det_src,
+                                window_start=fecha_ini,
+                                window_end=fecha_fin
+                            ).dt.date
+
+                        detalle_cols = [
+                            c
+                            for c in [
+                                "Jefe directo",
+                                "Vendedor",
+                                "Cliente",
+                                "Telefono",
+                                "Folio",
+                                "Fecha Back Office",
+                                "Fecha cancelacion",
+                                "Fecha cancelación",
+                                "Fecha Cancelacion",
+                                "Fecha Cancelación",
+                                "Centro",
+                                "Estatus",
+                                "Venta",
+                            ]
+                            if c in df_det_src.columns
+                        ]
+
+                        df_det = df_det_src[detalle_cols].rename(
+                            columns={
+                                "Vendedor": "Ejecutivo",
+                                "Telefono": "Telefono cliente",
+                            }
+                        )
+
+                        df_det = df_det.sort_values(
+                            [col for col in ["Jefe directo", "Ejecutivo", "Fecha Back Office", "Folio"] if col in df_det.columns]
+                        )
+
+                        st.dataframe(df_det, width="stretch")
+
+                        st.download_button(
+                            "Descargar Detalle Canceladas (Excel) — Intervalo",
+                            data=df_to_excel_bytes(df_det, "DetalleCanceladasIntervalo"),
+                            file_name=f"detalle_canceladas_{canc_ini}_{canc_fin}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        )
 
     # ==================== TAB 3: PROGRAMADAS X SEMANA ====================
     with tabs[3]:

@@ -1718,41 +1718,49 @@ def main():
         if df_prog_base.empty:
             st.info("No hay programadas para los filtros actuales.")
         else:
-            df_prog = df_prog_base
+            # ✅ Usar la misma lógica de Back Office para que coincida con esa pestaña
+            bo_dt = choose_backoffice_dt(df_prog_base, window_start=fecha_ini, window_end=fecha_fin)
 
+            df_prog = df_prog_base[bo_dt.notna()].copy()
+            df_prog["BO_DT"] = bo_dt[bo_dt.notna()]
+            df_prog["BO_Fecha"] = df_prog["BO_DT"].dt.date
+
+            # ✅ Filtrar por el rango seleccionado usando la fecha de Back Office
+            df_prog = df_prog[
+                (df_prog["BO_Fecha"] >= fecha_ini) & (df_prog["BO_Fecha"] <= fecha_fin)
+            ].copy()
+
+            # ✅ Si hay filtro de mes, aplicarlo sobre Back Office, no sobre Fecha creacion
             if mes_sel != "All":
-                month_rows = df_no_month[df_no_month["Mes"] == mes_sel].copy()
-                if not month_rows.empty:
-                    start_ts = pd.to_datetime(month_rows["Fecha creacion"], errors="coerce").min()
-                    end_ts = pd.to_datetime(month_rows["Fecha creacion"], errors="coerce").max()
+                df_prog = df_prog[df_prog["BO_DT"].dt.strftime("%B") == mes_sel].copy()
 
-                    if pd.notna(start_ts) and pd.notna(end_ts):
-                        week_start = start_ts - pd.Timedelta(days=int(start_ts.weekday()))
-                        week_end = end_ts + pd.Timedelta(days=int(6 - end_ts.weekday()))
+            if df_prog.empty:
+                st.info("No hay programadas para los filtros actuales.")
+            else:
+                iso_bo = df_prog["BO_DT"].dt.isocalendar()
+                df_prog["BO_Año Semana"] = (
+                    iso_bo["year"].astype(str) + "-W" + iso_bo["week"].astype(str).str.zfill(2)
+                )
 
-                        df_prog = df_prog_base[
-                            (df_prog_base["Fecha creacion"] >= week_start)
-                            & (df_prog_base["Fecha creacion"] <= week_end)
-                        ].copy()
+                by_week = df_prog.groupby("BO_Año Semana", as_index=False).size()
 
-            by_week = df_prog.groupby("Año Semana", as_index=False).size()
-            fig = px.bar(
-                by_week,
-                x="Año Semana",
-                y="size",
-                title="Vista general de programadas por semana",
-                labels={"size": "Total Programadas"},
-            )
-            fig.update_xaxes(type="category")
-            add_bar_value_labels(fig)
-            st.plotly_chart(fig, width="stretch")
+                fig = px.bar(
+                    by_week,
+                    x="BO_Año Semana",
+                    y="size",
+                    title="Vista general de programadas por semana",
+                    labels={"size": "Total Programadas", "BO_Año Semana": "Año Semana"},
+                )
+                fig.update_xaxes(type="category")
+                add_bar_value_labels(fig)
+                st.plotly_chart(fig, width="stretch")
 
-            st.download_button(
-                "Descargar Programadas (Excel)",
-                data=df_to_excel_bytes(df_prog, "Programadas"),
-                file_name=f"programadas_{fecha_ini}_{fecha_fin}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+                st.download_button(
+                    "Descargar Programadas (Excel)",
+                    data=df_to_excel_bytes(df_prog, "Programadas"),
+                    file_name=f"programadas_{fecha_ini}_{fecha_fin}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
 
     # ==================== TAB 4: PROGRAMADAS – TOP EJECUTIVOS ====================
     with tabs[4]:

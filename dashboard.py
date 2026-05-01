@@ -14,7 +14,7 @@ EXCLUDED_VENDOR = "ABASTECEDORA Y SUMINISTROS ORTEGA/ISABEL VALDEZ JIMENEZ"
 
 # ✅ Base window MUST match Power BI query exactly
 PBI_START = date(2025, 12, 1)
-PBI_END = date(2026, 4, 30)  # ✅ Power BI M code uses '20260131'
+PBI_END = date(2026, 5, 31)  # ✅ Power BI M code uses '20260131'
 
 # -------------------------------------------------
 # CONFIG STREAMLIT
@@ -198,8 +198,25 @@ def choose_backoffice_dt(df: pd.DataFrame, window_start: date, window_end: date)
         in2 = dt_monthfirst.between(w0, w1)
 
         out = dt_dayfirst.copy()
+
+        # Si solo monthfirst cae dentro del rango, usar monthfirst
         out = out.where(~(in2 & ~in1), dt_monthfirst)
+
+        # Si dayfirst está vacío y monthfirst sí existe, usar monthfirst
         out = out.where(~(dt_dayfirst.isna() & dt_monthfirst.notna()), dt_monthfirst)
+
+        # ✅ FIX ESPECÍFICO BACK OFFICE:
+        # Cuando ambas interpretaciones caen dentro del rango, pero dan fechas diferentes,
+        # la columna Back Office viene como MM/DD/YYYY desde SQL, por eso se debe usar monthfirst.
+        both_inside = in1 & in2
+        both_valid_different = (
+            dt_dayfirst.notna()
+            & dt_monthfirst.notna()
+            & (dt_dayfirst != dt_monthfirst)
+        )
+
+        out = out.where(~(both_inside & both_valid_different), dt_monthfirst)
+
         return out
 
     # Fallback (si por alguna razón no existieran)

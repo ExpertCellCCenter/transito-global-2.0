@@ -1197,7 +1197,7 @@ def main():
                 if not bo_dates_all:
                     st.info("No hay fechas Back Office disponibles para descargar.")
                 else:
-                    bo_min_d = bo_dates_all[0]
+                    bo_min_d = pd.to_datetime("2025-12-29").date()
                     bo_max_d = bo_dates_all[-1]
 
                     bo_range = st.date_input(
@@ -1739,7 +1739,7 @@ def main():
                 if not fechas_cancel_all:
                     st.info("No hay fechas disponibles para descargar el detalle por intervalo.")
                 else:
-                    min_cancel_date = fechas_cancel_all[0]
+                    min_cancel_date = pd.to_datetime("2025-12-29").date()
                     max_cancel_date = fechas_cancel_all[-1]
 
                     rango_cancel = st.date_input(

@@ -1,8 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import date, datetime, time, timedelta
-from zoneinfo import ZoneInfo
+from datetime import date, datetime, time
 import pyodbc
 import plotly.express as px
 from io import BytesIO
@@ -16,59 +15,6 @@ EXCLUDED_VENDOR = "ABASTECEDORA Y SUMINISTROS ORTEGA/ISABEL VALDEZ JIMENEZ"
 # ✅ Base window MUST match Power BI query exactly
 PBI_START = date(2025, 12, 29)
 PBI_END = date(2026, 5, 31)  # ✅ Power BI M code uses '20260131'
-
-# ✅ Scheduled refresh windows in Mexico City time
-MEXICO_CITY_TZ = ZoneInfo("America/Mexico_City")
-SCHEDULED_UPDATE_TIMES_CDMX = [
-    time(9, 0),
-    time(13, 0),
-    time(16, 0),
-    time(19, 0),
-    time(20, 30),
-]
-
-
-def get_mexico_city_now() -> datetime:
-    return datetime.now(MEXICO_CITY_TZ)
-
-
-def get_scheduled_update_window_cdmx(now_cdmx: datetime | None = None) -> tuple[datetime, datetime]:
-    """Return the last and next scheduled update using Mexico City time."""
-    now_cdmx = now_cdmx or get_mexico_city_now()
-    today_cdmx = now_cdmx.date()
-
-    today_slots = [
-        datetime.combine(today_cdmx, t, tzinfo=MEXICO_CITY_TZ)
-        for t in SCHEDULED_UPDATE_TIMES_CDMX
-    ]
-
-    last_candidates = [slot for slot in today_slots if slot <= now_cdmx]
-    if last_candidates:
-        last_update = last_candidates[-1]
-    else:
-        previous_day = today_cdmx - timedelta(days=1)
-        last_update = datetime.combine(
-            previous_day,
-            SCHEDULED_UPDATE_TIMES_CDMX[-1],
-            tzinfo=MEXICO_CITY_TZ,
-        )
-
-    next_candidates = [slot for slot in today_slots if slot > now_cdmx]
-    if next_candidates:
-        next_update = next_candidates[0]
-    else:
-        next_day = today_cdmx + timedelta(days=1)
-        next_update = datetime.combine(
-            next_day,
-            SCHEDULED_UPDATE_TIMES_CDMX[0],
-            tzinfo=MEXICO_CITY_TZ,
-        )
-
-    return last_update, next_update
-
-
-def fmt_cdmx_datetime(dt: datetime) -> str:
-    return dt.strftime("%d/%m/%Y %H:%M") + " CDMX"
 
 # -------------------------------------------------
 # CONFIG STREAMLIT
@@ -208,12 +154,10 @@ div[data-testid="stDownloadButton"] > button:hover {
 )
 
 # -------------------------------------------------
-# SESSION STATE
+# SESSION STATE (control refresh manually)
 # -------------------------------------------------
 if "base_data" not in st.session_state:
     st.session_state["base_data"] = None
-if "base_update_token" not in st.session_state:
-    st.session_state["base_update_token"] = None
 
 # -------------------------------------------------
 # SMALL HELPER: DF -> EXCEL BYTES (auto-fit + filters)
@@ -699,17 +643,16 @@ def kpi_validacion_pbi_all(ventasnc_all: pd.DataFrame) -> int:
 def main():
     st.title("Dashboard Transito Global  – CC")
 
-    now_cdmx = get_mexico_city_now()
-    today_cdmx = now_cdmx.date()
-    last_update_cdmx, next_update_cdmx = get_scheduled_update_window_cdmx(now_cdmx)
-    update_token = last_update_cdmx.strftime("%Y%m%d_%H%M")
-
     st.sidebar.header("Filtros")
-    st.sidebar.caption(f"🕒 Última actualización programada: {fmt_cdmx_datetime(last_update_cdmx)}")
-    st.sidebar.caption(f"⏭️ Próxima actualización: {fmt_cdmx_datetime(next_update_cdmx)}")
+
+    if st.sidebar.button("🔄 Actualizar datos"):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.session_state["base_data"] = None
+        st.rerun()
 
     default_start = PBI_START
-    default_end = min(today_cdmx, PBI_END)
+    default_end = min(date.today(), PBI_END)
 
     fecha_ini = st.sidebar.date_input("Fecha inicio", default_start)
     fecha_fin = st.sidebar.date_input("Fecha fin", default_end)
@@ -718,17 +661,7 @@ def main():
         st.sidebar.error("La fecha inicio no puede ser mayor que la fecha fin.")
         return
 
-    previous_update_token = st.session_state.get("base_update_token")
-    needs_refresh = (
-        st.session_state["base_data"] is None
-        or previous_update_token != update_token
-    )
-
-    if needs_refresh:
-        if previous_update_token is not None and previous_update_token != update_token:
-            st.cache_data.clear()
-            st.cache_resource.clear()
-
+    if st.session_state["base_data"] is None:
         with st.spinner("Cargando datos desde SQL..."):
             hoja = load_hoja1()
             consulta_raw_base = load_consulta1(PBI_START, PBI_END)
@@ -740,7 +673,6 @@ def main():
                 "consulta_base": consulta_base,
                 "validacion_pbi": validacion_pbi,
             }
-            st.session_state["base_update_token"] = update_token
 
     hoja = st.session_state["base_data"]["hoja"]
     consulta_base = st.session_state["base_data"]["consulta_base"]

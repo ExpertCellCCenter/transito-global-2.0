@@ -14,7 +14,7 @@ EXCLUDED_VENDOR = "ABASTECEDORA Y SUMINISTROS ORTEGA/ISABEL VALDEZ JIMENEZ"
 
 # ✅ Base window MUST match Power BI query exactly
 PBI_START = date(2025, 12, 29)
-PBI_END = date(2026, 6, 30)  # ✅ Power BI M code uses '20260131'
+PBI_END = date(2026, 7, 31)  # ✅ Power BI M code uses '20260131'
 
 # -------------------------------------------------
 # CONFIG STREAMLIT
